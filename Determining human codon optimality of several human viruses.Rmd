@@ -1,0 +1,183 @@
+---
+title: "Determining Human codon optimality of several human viruses"
+output: html_document
+author: "Rae Goering"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(seqinr)
+library(tidyverse)
+library(qdapRegex)
+library(valr)
+```
+
+## What am I trying to do?
+In this R markdown I would like to develop a pipe for determining human codon optimality of text files of human virus genomes taken from ncbi. I intend the final product to be a datafile containing the viral gene annotations, GC content, CAI, and % human optimality. These datafiles will be used in down stream analyses.
+
+## How do I intend to do it?
+I will calculte the CAI and GC content of each viral transcript from the ncbi genome. I will also compare these transcripts to optimal human codons to determine % human optimality. Information from each transcript will be extracted from fasta titles.
+
+### Percent Optimal function:
+This function relies on w values calculated from HEK293 cells in a previous R markdown (obtaining_w_values.rmd). The w values are relative abundance values for each codon for an amino acid. A codon is "optimal" if it has a w value of 1.00. This function counts the number of optimal codons (w == 1) used in a transcript and caluclates the percent optimal codons for that transcript.
+
+```{r, percent optimal }
+percent_opt <- function(seq, tissue_w){  
+          w_val <- left_join(readRDS("tissue_w.txt"), readRDS("HEK_w.txt"))
+          opt_counts <-
+          seqinr::count(s2c(as.character(seq)), 3) %>%
+          as_tibble() %>% 
+          left_join(., w_val, by = c("Var1" = "codon")) %>%
+          mutate(n_opt = ifelse(w_val %>% select(tissue_w) %>% unlist() %>% as.double() == 1, n, 0))
+          
+          sum(opt_counts$n_opt)/sum(opt_counts$n) * 100
+          }
+
+```
+
+### Longest non-OPT function:
+This function relies on w values calculated from HEK293 cells in a previous R markdown (obtaining_w_values.rmd). Instead of calculating the percent of optimal codons in a transcript, this function calculates the longest stretch of non-optimal codons as it is hypothesized that these stretches may have a highly negative impact on translational efficiency by slowing ribosome elongation. 
+
+```{r, find longest run}
+
+longest_non_OPT <- function(seq){
+          w_val <- left_join(readRDS("tissue_w.txt"), readRDS("HEK_w.txt"))
+          OPT <- w_val %>% 
+              select(codon, w) %>% 
+              filter(w == 1.00) %>% 
+              select(codon) %>% 
+              unlist() %>% 
+              as.vector()
+          codon_count <- rle(strsplit(as.character(seq), "(?<=.{3})", perl = TRUE)[[1]] %in% OPT)
+          max(codon_count$lengths[codon_count$values == FALSE])
+          }
+
+```
+
+### The Massive "get_data" function:
+This function takes a fasta text file and generates meaningful, organized data for downstream analyses. See in code comments for more details.
+
+```{r, get data}
+get_data <- function(file, virus, genome, tissue){
+  ## load in viral fasta file, w values and extract fasta annotations
+             dat <- read.fasta(file)
+             w <- left_join(readRDS("tissue_w.txt"), readRDS("HEK_w.txt"))
+             dat_annotation <- getAnnot(dat)
+  
+  ## generate a data frame from extracted annotation information, include raw sequence    
+             
+             dat_df <- data.frame(name = names(dat), 
+                                  gene = as.character(rm_between(dat_annotation, "[gene=", "] ", extract = TRUE)), 
+                                  protein = as.character(rm_between(dat_annotation, "[protein=", "] ", extract = TRUE)),
+                                  location = as.character(rm_between(dat_annotation, "[location=", "] ", extract = TRUE)),
+                                  seq = unlist(getSequence(dat, as.string = TRUE)))
+            
+  ## tidy this data frame while calculating new values (GC%, sequence length, codon adaptability index and tissue specific codon adaptability index)                    
+             dat_df_tidy <- dat_df %>% as_tibble() %>% 
+                            mutate(length = nchar(as.character(seq)), 
+                            GC = unlist(map(map(as.character(dat_df$seq), s2c), GC)), 
+                            virus = virus, 
+                            genome = genome, 
+                            CAI = unlist(map(map(as.character(dat_df$seq), s2c), cai, w$w, numcode = 1, zero.threshold = 0.0001, zero.to = 0.01)),
+                            
+  ## here, tissue specific codon usage is utilized to calculate CAI if a virus is thought to have tropism to a human tissue type
+  
+                            tissue = tissue,
+                            tissue_CAI = if(tissue == "NA"){"NA"}else{ unlist(map(map(as.character(dat_df$seq), s2c), cai, w %>% select(tissue) %>% unlist() %>% as.double(), numcode = 1, zero.threshold = 0.0001, zero.to = 0.01))},
+                            
+  ## categorize proteins based on description: structural, enzyme, polyprotein or regulatory
+  ## unknown if description is not informative
+                            protein_type = ifelse(grepl("ase", dat_df$protein, fixed = TRUE), "enzyme", ifelse(grepl("regula", dat_df$protein, fixed = TRUE), "regulatory",ifelse(grepl("polyprotein", dat_df$protein, fixed = TRUE), "polyprotein", ifelse(nrow(dat_df) == 1, "polyprotein", "structural")))),
+                            protein_type = ifelse(protein_type == "structural" & length(unique(protein_type)) == 1, "unknown", protein_type), 
+  
+  ## again tissue specific information is utilized to calculate percent optimal codons
+  
+                            tissue_percent_opt = if(tissue == "NA"){"NA"}else{unlist(map(seq, percent_opt, tissue))},
+                            percent_opt = unlist(map(seq, percent_opt, "w")),
+  
+  ## longest non-optimal stretch is calculated only using HEK293 w values
+  
+                            non_OPT_length = unlist(map(seq, longest_non_OPT)),
+  
+  ## strandedness is not utilized yet could improve detail of overlapping genes in DNA genomes 
+  
+                            strand = ifelse(grepl("complement", dat_df$location, fixed = TRUE), "+", "-"), 
+  
+  ## location is separated into start and end by gene exons with dummy "chrom"" value for bed_intersect function
+                            location = unlist(ifelse(grepl("complement", dat_df$location, fixed = TRUE), 
+                                                     rm_between(as.character(dat_df$location), "complement(", ")", extract = TRUE), 
+                                                     as.character(location)))) %>% 
+                            mutate(location = unlist(ifelse(grepl("join", dat_df$location, fixed = TRUE), 
+                                                            rm_between(as.character(dat_df$location), "join(", ")", extract = TRUE), 
+                                                            as.character(location)))) %>% 
+                            separate(location, into = c("E1", "E2", "E3", "E4", "E5", "E6"), sep = ",") %>% 
+                            gather(starts_with("E"), key = "exons", value = "location") %>% 
+                            filter(location != "NA") %>% 
+                            separate(location, into = c("start", "end"), by = "..") %>% 
+                            mutate(chrom = virus, start = as.integer(start), end = as.integer(end), frame = start %% 3)
+
+  ## if gene names aren't extracted correctly, they are numbered           
+             dat_df_tidy <- dat_df_tidy %>% mutate(gene = ifelse(is.na(gene), as.character(1:n()), as.character(gene)))
+
+  ## bed_intersect determines which gene exons overlap, removes overlaps with identical genes
+             
+             dat_overlaps <- bed_intersect(dat_df_tidy, dat_df_tidy) %>% 
+                             mutate(overlap = ifelse(start.x == start.y & end.x == end.y, NA, paste(gene.y, exons.y, sep = "--")),
+                                    geneexon.x = paste(gene.x, exons.x, sep = "--"))
+          
+         dat_overlaps <- aggregate(overlap ~ geneexon.x, na.action = na.pass, data = dat_overlaps, paste, collapse = ", ")
+         dat_overlaps <- dat_overlaps %>%
+           as_tibble %>% 
+           mutate(overlap = gsub("NA, NA", "NA", .$overlap)) %>%
+           mutate(overlap = gsub(", NA", "", .$overlap)) %>%
+           mutate(overlap = gsub("NA, ", "", .$overlap))
+             
+         dat_overlaps %>% separate(geneexon.x, into = c("gene", "exons"), sep = "--") %>%
+                              as_tibble() %>% 
+                              left_join(dat_df_tidy, ., by = c("gene", "exons")) %>% 
+                              as_tibble() %>% 
+                              select(virus, genome, gene, protein_type, protein, length, GC, CAI, tissue, tissue_CAI, percent_opt, tissue_percent_opt, non_OPT_length, overlap, start, end, strand, frame, seq)
+                              }
+
+```
+
+### Virus shopping!
+get_data can be applied to many viral genomes from ncbi. Just go to the viral genome's graphic, click "send to:" and select "Coding Sequences". Download as a "FASTA Nucleotide format" and click "Create File".  Multiple genomes can all be combined to allow for downstream analyses.
+
+```{r, all the viruses, warning=FALSE, message=FALSE}
+HSV1_tidy <- get_data("HSV1.txt", "HSV1", "dsDNA", "NA")
+HepB_tidy <- get_data("HepB.txt", "HepB", "dsDNA", "liver_w")
+HIV1_tidy <- get_data("HIV1.txt", "HIV1", "retrovirus", "NA")
+HPV_tidy <- get_data("HPV.txt", "HPV", "dsDNA", "CervUter_w")
+mumps_tidy <- get_data("mumps.txt", "mumps", "-ssRNA", "NA")
+WNV1_tidy <- get_data("WNV1.txt", "WNV1", "+ssRNA", "NA")
+ZIKV_tidy <- get_data("zika.txt", "ZIKV", "+ssRNA", "placenta_w")
+H5N1_tidy <- get_data("H5N1.txt", "H5N1", "-ssRNA", "NA")
+H1N1_tidy <- get_data("H1N1.txt", "H1N1", "-ssRNA", "NA")
+CHIKV_tidy <- get_data("chikungunya.txt", "CHIKV", "+ssRNA", "NA")
+DENV_tidy <- get_data("dengue.txt", "DENV", "+ssRNA", "NA")
+HEA_tidy <- get_data("enterovirus A.txt", "HEA", "+ssRNA", "SmInt_w")
+HepC_tidy <- get_data("HepC.txt", "HepC", "+ssRNA", "liver_w")
+RABV_tidy <- get_data("rabies.txt", "RABV", "-ssRNA", "salivary_w")
+RhinoV_tidy <- get_data("RhinoV.txt", "RHIV", "+ssRNA", "lung_w")
+EBOLV_tidy <- get_data("ebola.txt", "EBOLV", "-ssRNA", "NA")
+cowpox_tidy <- get_data("Cowpox.txt", "cowpox", "dsDNA", "NA")
+polio_tidy <- get_data("polio.txt", "polio", "+ssRNA", "NA")
+HTLV2_tidy <- get_data("Human T-lymphotropic virus 2.txt", "HTLV2", "retrovirus", "NA")
+AdenoV_tidy <- get_data("Adeno-associatedV2.txt", "AdenoV", "dsDNA", "NA")
+Vaccina_tidy <- get_data("Vaccina.txt", "vaccina", "dsDNA", "NA")
+smallpox_tidy <- get_data("smallpox.txt", "smallpox", "dsDNA", "NA")
+YFV_tidy <- get_data("YellowFever.txt", "YFV", "+ssRNA", "NA")
+EBV_tidy <- get_data("EBV.txt", "EBV", "dsDNA", "lymph_w")
+CMV_tidy <- get_data("CMV.txt", "CMV", "dsDNA", "NA")
+chickenpox_tidy <- get_data("chickenpox.txt", "chickenpox", "dsDNA", "NA")
+rubella_tidy <- get_data("rubella.txt", "rubella", "+ssRNA", "NA")
+MeV_tidy <- get_data("measles.txt", "measles", "-ssRNA", "NA")
+rotaV1_tidy <- get_data("RotaV1.txt", "rotavirus1", "dsDNA", "NA")
+marburg_tidy <- get_data("marburg.txt", "marburg", "-ssRNA", "NA")
+
+virus_tidy <- rbind(HSV1_tidy, HepB_tidy, HIV1_tidy, HPV_tidy, mumps_tidy, WNV1_tidy, ZIKV_tidy, H5N1_tidy, H1N1_tidy, CHIKV_tidy, DENV_tidy, HEA_tidy, HepC_tidy, RABV_tidy, RhinoV_tidy, EBOLV_tidy, cowpox_tidy, polio_tidy, HTLV2_tidy, AdenoV_tidy, Vaccina_tidy, smallpox_tidy, YFV_tidy, EBV_tidy, CMV_tidy, chickenpox_tidy, rubella_tidy, MeV_tidy, rotaV1_tidy, marburg_tidy)
+
+saveRDS(virus_tidy, "virus_tidy.txt")
+
+```
