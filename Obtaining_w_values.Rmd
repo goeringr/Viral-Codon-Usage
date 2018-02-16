@@ -1,0 +1,524 @@
+---
+title: "Obtaining W values"
+author: "Rae Goering"
+date: "December 5, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(seqinr)
+library(eulerr)
+library(qdapRegex)
+library(DESeq2)
+
+```
+
+## What am I trying to do?
+In this R markdown I would like to calculate w values for CAI calculations. These are the relative codon abundance values specific to a species. Here I will explore the difference in codon use between general human expression (HEK293 cells) and other various tissue specific data sets. Then, I will calculate w values from several species to be used as negative controls. Once w values are calculated, they can be applied to viral transcripts to determine Human CAI scores which will reflect adaptability to a host.
+
+## How do I intend to do it?
+Expression data was obtained from the human protein atlas (https://www.proteinatlas.org/about/download) specifically the normal tissue data and the RNA gene data for cell lines. Also, sequence data from ensembl (ftp://ftp.ensembl.org/pub/release-90/fasta/homo_sapiens/cdna/) was used to link gene name to cdna sequence.This allows for analysis of only protein coding sequences but may complicate the relationship from gene name <-> cDNA transcript name. Only the longest isoform of each gene is used. If data origin differs from the above it is noted before the code block.
+
+### Loading in the Homo Sapiens cDNA fasta, extracting the annotations to use the ensembl gene name rather than the cDNA transcript name (ENSG vs ENST). Also, including only the longest isoform of each gene.
+
+```{r, ensemblSeq}
+HScDNA <- read.fasta("Homo_sapiens.GRCh38.cdna.all.fa.gz")
+annotation <- getAnnot(HScDNA)
+
+HScDNA_df <- data.frame(fragments = names(HScDNA), 
+                        Gene.ID = stringr::str_extract(annotation, "ENSG[:digit:]{11}"), 
+                        seq = unlist(getSequence(HScDNA, as.string=T)))
+
+HScDNA_tidy <- HScDNA_df %>% 
+               as_tibble() %>% 
+               mutate(length = nchar(as.character(seq))) %>% 
+               group_by(Gene.ID) %>% 
+               top_n(1, wt = length) 
+
+```
+## HEK Expression Data
+
+### Loading the cell line expression data and collecting the most highly expressed genes. The top 100, 500, 1000, and 10,000 genes were analyzed.
+
+```{r, HEKdata}
+HEK <- read.csv("rna_celline.tsv/rna_celline.tsv", sep = "\t")
+HEK <- HEK %>% as_tibble() %>% 
+        filter(Sample == "HEK 293")
+
+get_top_genes <- function(data, num){
+                  data %>% 
+                  top_n(n = num, wt = Value) %>% 
+                  select(Gene) %>% 
+                  sapply(as.character) %>% 
+                  as.vector()
+                  }
+
+
+HEK100 <- get_top_genes(HEK, 100)
+HEK500 <- get_top_genes(HEK, 500)
+HEK1000 <- get_top_genes(HEK, 1000)
+HEK10000 <- get_top_genes(HEK, 10000)
+
+```
+
+### Obtaining the sequences of the highly expressed genes using the ensembl cDNA fasta. These sequence files then have relative synonymous codon usage (RSCU) calculated and stored.
+
+```{r, HEKseq}
+HScDNA_tidy <- readRDS("HScDNA_longest_tidy.txt")
+
+get_gene_seq <- function(data, genes){
+                  data %>% 
+                  filter(Gene.ID %in% genes) %>% 
+                  ungroup() %>% 
+                  pull(seq) %>% 
+                  as.vector()
+                  }
+
+
+HEK100seq <- get_gene_seq(HScDNA_tidy, HEK100)
+HEK500seq <- get_gene_seq(HScDNA_tidy, HEK500)
+HEK1000seq <- get_gene_seq(HScDNA_tidy, HEK1000)
+HEK10000seq <- get_gene_seq(HScDNA_tidy, HEK10000)
+
+mean_RSCU <- function(seqs){
+               z <- lapply(lapply(lapply(seqs, s2c), 
+               uco, frame = 0, 
+               index = c("eff", "freq", "rscu"),
+               as.data.frame = TRUE, 
+               NA.rscu = NA), 
+               subset.data.frame, select = "RSCU")
+
+               RSCU <- z %>% lapply(as.matrix) %>% as.data.frame() %>% rowMeans(na.rm = TRUE) %>% as.data.frame() 
+               colnames(RSCU) <- "RSCU"
+               RSCU
+               }
+  
+
+HEK100RSCU <- mean_RSCU(HEK100seq)
+HEK500RSCU <- mean_RSCU(HEK500seq)
+HEK1000RSCU <- mean_RSCU(HEK1000seq)
+HEK10000RSCU <- mean_RSCU(HEK10000seq)
+
+HEK_RSCU <- cbind(HEK100RSCU, HEK500RSCU, HEK1000RSCU, HEK10000RSCU)
+colnames(HEK_RSCU) <- c("100", "500", "1000", "10000")
+
+saveRDS(HEK_RSCU, file = "HEK_RSCU.txt")
+
+```
+
+### A fun plot of RSCUs for each number of top genes used for analysis.
+I noticed that the analysis on 10,000 genes is sometimes the most different from the other 3 analyses. I think this is due to the "highly expressed" character of the genes being washed out with many genes that arent highly expressed. Also, spearman correlation coefficients are calculated.
+
+```{r, RSCU_check, fig.width = 25}
+HEK_RSCU <- readRDS("HEK_RSCU.txt")
+HEK_RSCU_tidy<- HEK_RSCU %>%
+                as_tibble() %>%
+                mutate(codon = row.names(HEK_RSCU)) %>% 
+                gather(top_gene, RSCU, -codon)
+
+HEK_RSCU_tidy %>% ggplot(aes(x = factor(codon), y = RSCU, fill = top_gene)) +
+                  geom_bar(stat = "identity", position = "dodge")
+
+cor(HEK_RSCU, method = "spearman")
+
+```
+
+### Calculation of w values for HEK1000RSCU
+
+```{r, calc_HEKw}
+AA_codon <- readRDS("AA_codon.txt")
+HEK1000RSCU <- HEK_RSCU_tidy %>% 
+               filter(top_gene == 1000) %>% 
+               mutate(AA = AA_codon$AA) 
+
+max_HEK_RSCU <- HEK1000RSCU %>% group_by(AA) %>% 
+                summarize_at(.vars = "RSCU", .funs = max)
+HEK_w <- inner_join(HEK1000RSCU, max_HEK_RSCU, by = "AA") 
+HEK_w <- HEK_w %>% mutate(w = RSCU.x / RSCU.y) %>% select(codon, AA, w)
+
+saveRDS(HEK_w, "HEK_w.txt")
+
+```
+## Tissue Specific Data
+
+Tissues were selected for study based on known viral tropism (cervix/uterine, liver, placenta, small intestine, lymph nodes) or known viral infection routes (salivary gland, skin, lung). 
+
+### Loading the tissue data and getting top expressed genes.
+The top 1000 genes were extracted for each tissue.
+
+```{r, Tissue data }
+norm_tissue <- read.csv("rna_tissue.tsv/rna_tissue.tsv", sep = "\t")
+
+get_top_tissue_genes <- function(data, tissue){
+                          data %>% 
+                          as_tibble() %>% 
+                          filter(Sample == tissue) %>% 
+                          top_n(n = 1000, wt = Value) %>% 
+                          select(Gene) %>%
+                          sapply(as.character) %>%
+                          as.vector()
+                          }
+
+CervUter <- get_top_tissue_genes(norm_tissue, "cervix, uterine") 
+liver <- get_top_tissue_genes(norm_tissue, "liver")
+SmInt <- get_top_tissue_genes(norm_tissue, "small intestine")
+lymph <- get_top_tissue_genes(norm_tissue, "lymph node")
+lung <- get_top_tissue_genes(norm_tissue, "lung")
+placenta <- get_top_tissue_genes(norm_tissue, "placenta")
+salivary <- get_top_tissue_genes(norm_tissue, "salivary gland")
+skin <- get_top_tissue_genes(norm_tissue, "skin")
+
+```
+
+### Calculating RSCUs from the selected genes
+
+```{r, tissue seqs}
+HScDNA_tidy <- readRDS("HScDNA_longest_tidy.txt")
+
+CervUterseq <- get_gene_seq(HScDNA_tidy, CervUter)
+liverseq <- get_gene_seq(HScDNA_tidy, liver)
+SmIntseq <- get_gene_seq(HScDNA_tidy, SmInt)
+lymphseq <- get_gene_seq(HScDNA_tidy, lymph)
+lungseq <- get_gene_seq(HScDNA_tidy, lung)
+placentaseq <- get_gene_seq(HScDNA_tidy, placenta)
+salivaryseq <- get_gene_seq(HScDNA_tidy, salivary)
+skinseq <- get_gene_seq(HScDNA_tidy, skin)
+
+```
+
+```{r, tissueRSCUs}
+mean_RSCU <- function(seqs){
+               z <- lapply(lapply(lapply(seqs, s2c), 
+               uco, frame = 0, 
+               index = c("eff", "freq", "rscu"),
+               as.data.frame = TRUE, 
+               NA.rscu = NA), 
+               subset.data.frame, select = "RSCU")
+
+               plyr::aaply(plyr::laply(z, as.matrix), c(2), mean, na.rm = TRUE) %>% as.data.frame()
+               }
+
+CervUterRSCU <- mean_RSCU(CervUterseq)
+liverRSCU <- mean_RSCU(liverseq)
+SmIntRSCU <- mean_RSCU(SmIntseq)
+lymphRSCU <- mean_RSCU(lymphseq)
+lungRSCU <- mean_RSCU(lungseq)
+placentaRSCU <- mean_RSCU(placentaseq)
+salivaryRSCU <- mean_RSCU(salivaryseq)
+skinRSCU <- mean_RSCU(skinseq)
+
+tissueRSCU <- cbind(CervUterRSCU, liverRSCU, SmIntRSCU, lymphRSCU, lungRSCU, placentaRSCU, salivaryRSCU, skinRSCU)
+colnames(tissueRSCU) <- c("CervUterRSCU", "liverRSCU", "SmIntRSCU", "lymphRSCU", "lungRSCU", "placentaRSCU", "salivaryRSCU", "skinRSCU")
+
+saveRDS(tissueRSCU, "tissue_RSCU.txt")
+
+```
+
+### A fun plot of RSCUs for different tissue types.
+They are all pretty similar. Codon usage does not vary much from tissue to tissue.
+
+
+```{r, RSCU_tissue_check, fig.width = 20 }
+tissueRSCU <- readRDS("tissue_RSCU.txt")
+AA_codon <- readRDS("AA_codon.txt")
+tissueRSCU_tidy <- tissueRSCU %>% 
+                   as_tibble() %>% 
+                   mutate(codon = row.names(tissueRSCU), AA = AA_codon$AA) %>% 
+                   gather(tissue, RSCU, -codon, -AA)
+
+tissueRSCU_tidy %>% ggplot(aes(x = factor(codon), y = RSCU, fill = tissue)) + 
+                    geom_bar(stat = "identity", position = "dodge")
+
+cor(tissueRSCU, method = "spearman")
+
+```
+
+### Calculation of w values for tissue RSCUs
+
+```{r, calc_w}
+max_tissue_RSCU <- tissueRSCU_tidy %>% 
+                   group_by(AA, tissue) %>% 
+                   summarize_at(.vars = "RSCU", .funs = max) 
+tissue_w <- inner_join(tissueRSCU_tidy, max_tissue_RSCU, by = c("AA", "tissue"))
+
+tissue_w <- tissue_w %>% 
+            mutate(w = RSCU.x / RSCU.y) %>% 
+            select(codon, AA, w, tissue) %>% 
+            spread(tissue, w) 
+
+colnames(tissue_w) <- c("codon", "AA", "CervUter_w", "liver_w", "lung_w", "lymph_w", "placenta_w", "salivary_w", "skin_w", "SmInt_w")
+
+saveRDS(tissue_w, "tissue_w.txt")
+
+```
+
+## Comparing top expressed genes
+
+```{r, gene compare}
+genes <- list(HEK1000, CervUter, liver, SmInt, lymph, lung, placenta, salivary, skin)
+all_genes <- genes %>% unlist() %>% unique()
+
+lgl_df <- map(genes, ~as_data_frame(all_genes %in% .x))
+lgl_df <- bind_cols(lgl_df) %>% as.data.frame()
+           
+v <- euler(lgl_df)
+plot(v,labels = c("HEK", "CervUter", "liver", "Small Intestine", "lymph node", "lung", "placenta", "salivary gland"), counts=TRUE)
+
+```
+
+## Comparing the tissue w's to HEK1000 w
+"w" is from HEK293 data.
+
+```{r compare}
+compare <- left_join(tissue_w, HEK_w)
+cor(compare[3:11])
+compare %>% gather(key = tissue, value = w_val, -AA, -codon) %>% 
+            ggplot(aes(codon, w_val, fill = tissue)) + 
+                   geom_bar(stat = "identity", position = "dodge")
+
+```
+
+HEK293 w values and all of the tissue w values calculated do not significantly differ. Further analysis will use HEK_w to caluculate CAI scores for transcripts of interest. 
+
+## Negative Control W values
+
+### Getting yeast w's
+
+Reference Yeast RNA-seq data acquired from Expression Atlas using normalized count values (https://www.ebi.ac.uk/gxa/experiments/E-GEOD-59814/Results)
+
+yeast sequences obtained from saccharomyces genome data base (https://downloads.yeastgenome.org/sequence/S288C_reference/orf_dna/)
+ 
+```{r, yeast1}
+SCcDNA <- read.fasta("yeast_orf_coding_all.fasta.gz")
+annotation <- getAnnot(SCcDNA)
+
+SCcDNA_df <- data.frame(Gene.ID = names(SCcDNA), 
+                        seq = unlist(getSequence(SCcDNA, as.string=T)))
+
+SCcDNA_tidy <- SCcDNA_df %>% 
+               as_tibble() %>% 
+               mutate(length = nchar(as.character(seq)))
+               
+saveRDS(SCcDNA_tidy, "SCcDNA_longest_tidy.txt")
+
+```
+
+```{r, yeast2}
+yeast_raw <- read.csv("E-GEOD-22809-A-AFFY-47-normalized-expressions.tsv", sep = "\t")
+yeast_tidy <- yeast_raw %>% 
+              as_tibble %>% select(1, 2, 9, 14, 15) %>% 
+              gather(GSM563813, GSM563814, GSM563815, key = key, value = value) %>% 
+              group_by(Gene.ID) %>% 
+              summarise(Value = mean(value)) %>% 
+              mutate(Gene = Gene.ID) 
+
+
+yeast1000 <- get_top_genes(yeast_tidy, 1000)
+yeast1000seq <- get_gene_seq(SCcDNA_tidy, yeast1000)
+yeast1000RSCU <- mean_RSCU(yeast1000seq)
+
+yeast1000RSCU <- yeast1000RSCU %>% as_tibble() %>% rownames_to_column(var = "codon") %>% mutate(AA = AA_codon$AA) 
+max_yeast_RSCU <- yeast1000RSCU %>% group_by(AA) %>% summarize_at(.vars = ".", .funs = max)
+
+yeast_w <- inner_join(yeast1000RSCU, max_yeast_RSCU, by = "AA") 
+yeast_w <- yeast_w %>% mutate(w = ..x / ..y) %>% select(codon, AA, w)
+
+saveRDS(yeast_w, "yeast_w.txt")
+
+```
+
+### Getting fly w's 
+
+fly sequences were obtained from flybank.net (http://flybase.org/cgi-bin/get_static_page.pl?file=bulkdata7.html&title=Current%20Release)
+and expression values from Expression Atlas
+(https://www.ebi.ac.uk/gxa/experiments/E-MTAB-5069/Experiment%20Design)
+expression counts were normalized with DEseq2
+
+```{r, fly1}
+DMcDNA <- read.fasta("dmel-all-CDS-r6.19.fasta.gz")
+annotation <- getAnnot(DMcDNA)
+
+DMcDNA_df <- data.frame(Gene.ID = as.character(rm_between(annotation, "parent=", ",FB", extract = TRUE)), 
+                        seq = unlist(getSequence(DMcDNA, as.string=T)))
+
+DMcDNA_tidy <- DMcDNA_df %>% 
+               as_tibble() %>% 
+               mutate(length = nchar(as.character(seq))) %>% 
+               group_by(Gene.ID) %>% 
+               top_n(1, wt = length) 
+
+saveRDS(DMcDNA_tidy, file = "DMcDNA_longest_tidy.txt")
+
+```
+
+```{r, fly2}
+DM_raw <- read.csv("E-MTAB-5069-raw-counts (1).tsv", sep = "\t")
+rownames(DM_raw) <- DM_raw$Gene.ID
+DM_mat <- as.matrix(DM_raw[3:5])
+DM_mat_coldata <- as.data.frame(c(colnames(DM_raw[3:5])))
+DM_mat_coldata<- cbind(DM_mat_coldata, c("WT", "WT", "WT"))
+colnames(DM_mat_coldata) <- c("rep", "genotype")
+
+dds <- DESeqDataSetFromMatrix(DM_mat, colData = DM_mat_coldata, design = ~1)
+dds <- dds[rowSums(counts(dds)) > 1,]
+rld <- rlog(dds, blind = FALSE)
+
+DM_norm_tidy <- assay(rld) %>% 
+                as_tibble() %>% 
+                mutate(Gene = rownames(rld)) %>% 
+                gather(ERR1659925, ERR1659926, ERR1659927, key = key, value = value) %>% 
+                group_by(Gene) %>% 
+                summarise(Value = mean(value))
+
+DM1000 <- get_top_genes(DM_norm_tidy, 1000)
+DM1000seq <- get_gene_seq(DMcDNA_tidy, DM1000)
+DM1000RSCU <- mean_RSCU(DM1000seq)
+
+DM1000RSCU <- DM1000RSCU %>% 
+              as_tibble() %>% 
+              rownames_to_column(var = "codon") %>% 
+              mutate(AA = AA_codon$AA)
+
+max_DM_RSCU <- DM1000RSCU %>% 
+               group_by(AA) %>% 
+               summarize_at(.vars = ".", .funs = max)
+
+DM_w <- inner_join(DM1000RSCU, max_DM_RSCU, by = "AA") 
+DM_w <- DM_w %>% mutate(w = ..x / ..y) %>% select(codon, AA, w)
+
+saveRDS(DM_w, "DM_w.txt")
+
+```
+
+### Getting mouse w's
+
+mouse cDNA from ensembl (ftp://ftp.ensembl.org/pub/release-91/fasta/mus_musculus/cdna/)
+
+mouse RNAseq from NCBI geo data sets (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE64296)
+
+```{r, mouse1}
+MMcDNA <- read.fasta("Mus_musculus.GRCm38.cdna.all.fa.gz")
+annotation <- getAnnot(MMcDNA)
+
+MMcDNA_df <- data.frame(Gene.ID = as.character(rm_between(annotation, "gene_symbol:", "description", extract = TRUE)), 
+                        seq = unlist(getSequence(MMcDNA, as.string=T)))
+
+MMcDNA_tidy <- MMcDNA_df %>% 
+               as_tibble() %>% 
+               mutate(length = nchar(as.character(seq))) %>% 
+               group_by(Gene.ID) %>% 
+               top_n(1, wt = length) 
+
+saveRDS(MMcDNA_tidy, file = "MMcDNA_longest_tidy.txt")
+
+```
+
+```{r, mouse2}
+mouse_counts <- read.csv("GSE64296_NIH3T3_FPKM.txt", sep = "\t")
+
+
+mouse_counts <- mouse_counts[,2:3]
+colnames(mouse_counts) <- c("Gene", "Value")
+
+mouse1000 <- get_top_genes(mouse_counts, 1000)
+mouse1000seq <- get_gene_seq(MMcDNA_tidy, mouse1000)
+mouse1000RSCU <- mean_RSCU(mouse1000seq)
+
+
+mouse1000RSCU <- mouse1000RSCU %>% 
+                 as_tibble() %>% 
+                 rownames_to_column(var = "codon") %>% 
+                 mutate(AA = AA_codon$AA) 
+
+max_mouse_RSCU <- mouse1000RSCU %>% 
+                  group_by(AA) %>% 
+                  summarize_at(.vars = ".", .funs = max)
+
+mouse_w <- inner_join(mouse1000RSCU, max_mouse_RSCU, by = "AA") 
+mouse_w <- mouse_w %>% mutate(w = ..x / ..y) %>% select(codon, AA, w)
+
+saveRDS(mouse_w, "mouse_w.txt")
+
+```
+
+### Getting mosquito w's
+Aedes Aegyptis cDNA data from ensembl (ftp://ftp.ensemblgenomes.org/pub/metazoa/release-38/fasta/aedes_aegypti/cdna/)
+Expression data taken from GEO ncbi data sets (https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE102939)
+expression counts were normalized with DEseq2
+
+```{r, mosquito1}
+AAcDNA <- read.fasta("Aedes_aegypti.AaegL3.cdna.all.fa.gz")
+annotation <- getAnnot(AAcDNA)
+
+AAcDNA_df <- data.frame(Gene.ID = as.character(rm_between(annotation, ">", "-RA", extract = TRUE)), 
+                        seq = unlist(getSequence(AAcDNA, as.string=T)))
+
+AAcDNA_tidy <- AAcDNA_df %>% 
+               as_tibble() %>% 
+               mutate(length = nchar(as.character(seq))) %>% 
+               group_by(Gene.ID) %>% 
+               top_n(1, wt = length) 
+
+saveRDS(AAcDNA_tidy, file = "AAcDNA_longest_tidy.txt")
+
+```
+
+```{r, mosquito2}
+mosquito_raw <- read.csv("GSE102939_Expression_Profile_Day_7.txt.gz", sep = "\t")
+rownames(mosquito_raw) <- mosquito_raw$Name
+mosquito_raw <- mosquito_raw[c(23,27,31)]
+colnames(mosquito_raw) <- c("P1", "P2", "P3")
+
+mosquito_mat <- as.matrix(mosquito_raw)
+
+mosquito_mat_coldata <- as.data.frame(c("P1", "P2", "P3"))
+mosquito_mat_coldata<- cbind(mosquito_mat_coldata, c("WT", "WT", "WT"))
+colnames(mosquito_mat_coldata) <- c("rep", "genotype")
+
+dds <- DESeqDataSetFromMatrix(mosquito_mat, colData = mosquito_mat_coldata, design = ~1)
+dds <- dds[rowSums(counts(dds)) > 1,]
+rld <- rlog(dds, blind = FALSE)
+
+AA_norm_tidy <- assay(rld) %>% 
+                as_tibble() %>% 
+                mutate(rownames = rownames(rld)) %>% 
+                gather(P1, P2, P3, key = key, value = value) %>% 
+                group_by(rownames) %>% summarise(Value = mean(value)) %>% 
+                mutate(Gene = ifelse(grepl("AaeL_", rownames), substr(rownames, 6, 15), rownames)) %>% 
+                select(Gene, Value)
+
+
+AA1000 <- get_top_genes(AA_norm_tidy, 1000)
+AA1000seq <- get_gene_seq(AAcDNA_tidy, AA1000)
+AA1000RSCU <- mean_RSCU(AA1000seq)
+
+
+AA1000RSCU <- AA1000RSCU %>% 
+              as_tibble() %>% 
+              rownames_to_column(var = "codon") %>% 
+              mutate(AA = AA_codon$AA)
+
+
+max_AA_RSCU <- AA1000RSCU %>% 
+               group_by(AA) %>% 
+               summarize_at(.vars = ".", .funs = max)
+
+AA_w <- inner_join(AA1000RSCU, max_AA_RSCU, by = "AA") 
+AA_w <- AA_w %>% mutate(w = ..x / ..y) %>% select(codon, AA, w)
+
+saveRDS(AA_w, "AA_w.txt")
+
+```
+
+## Combining negative control w values
+
+```{r neg ws}
+neg_ctrl_w <- cbind(HEK_w, yeast_w$w, DM_w$w, AA_w$w, mouse_w$w)
+colnames(neg_ctrl_w) <- c("codon", "AA", "human", "yeast", "fly", "mosquito", "mouse")
+
+saveRDS(neg_ctrl_w, "neg_ctrl_w.txt")
+
+```
+
