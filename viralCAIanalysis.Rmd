@@ -1,0 +1,757 @@
+---
+title: "Viral CAI Analysis"
+author: "Rae G"
+date: "December 19, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(cowplot)
+library(ggpubr)
+library(seqinr)
+library(viridis)
+```
+
+## What am I trying to do?
+In this R markdown I will explore the relationships between viruses and their codon adaptability to Human. All viruses studied infect humans, they will be somewhat categorized by their genome type and host range, but mostly by various traits of the transcripts encoded in their genomes such as length, GC content, Codon adaptability, longest stretch of non-optimal codons, and percent human optimal codon content.
+
+## How do I intend to do it?
+I will use descriptive statistics and linear models to visually show relationships.
+
+virus_tidy was created by the get_data function from "Determining human codon optimality of several human viruses"
+
+```{r, }
+virus_tidy <- readRDS("virus_tidy.txt")
+```
+
+### what does this data look like on the human genome
+For comparison and to set a baseline for downstream analyses it is important to know how well an average human transcript is "adapted" to human codon usage.
+
+```{r,  human stuff, warning=FALSE, message=FALSE}
+HScDNA_tidy <- readRDS("HScDNA_longest_tidy.txt")
+
+human_CAI <- mean(HScDNA_tidy$CAI)
+human_percent_opt <- mean(HScDNA_tidy$percent_opt)
+
+HScDNA_tidy %>% ggplot(aes(human, CAI, fill = human)) + 
+                      geom_boxplot() + 
+                      xlab("") + 
+                      geom_text(aes(x = 0.75, y = 1, label = paste("mean = ", format(human_CAI, digits = 3)))) +
+                      theme(legend.position="none")
+HScDNA_tidy %>% ggplot(aes(human, percent_opt, fill = human)) + 
+                      geom_boxplot() + xlab("") + 
+                      geom_text(aes(x = 0.75, y = 60, label = paste("mean = ", format(human_percent_opt, digits = 3)))) +
+                      theme(legend.position="none")
+
+```
+
+An average human transcript has a CAI of `r human_CAI` and percent_opt of `r human_percent_opt`%
+
+### Quick Descriptions of Collected Data
+
+```{r, data characteristics, warning=FALSE}
+virus_tidy %>% group_by(genome) %>% 
+               summarize(viruses = length(unique(virus))) %>% 
+               ggplot(aes(genome, viruses, fill = genome)) + 
+                      geom_bar(stat = "identity") + 
+                      labs(xlab = "Genome Type", 
+                           ylab = "Number of Viruses", 
+                           title = "Number of Viruses per Genome Type") + 
+                      theme(legend.position = "none")
+
+virus_tidy %>% group_by(genome) %>% 
+               summarize(transcripts = n()) %>% 
+               ggplot(aes(genome, transcripts, fill = genome)) + 
+                      geom_bar(stat = "identity") + 
+                      labs(xlab = "Genome Type", 
+                           ylab = "Number of Transcripts", 
+                           title = "Number of Transcripts per Genome Type") + 
+               theme(legend.position="none")
+
+virus_tidy %>% group_by(virus) %>% 
+               mutate(transcripts = n()) %>% 
+               ggplot(aes(genome, transcripts, fill = genome)) + 
+                      geom_boxplot() + 
+                      labs(xlab = "Genome Type", 
+                           ylab = "Average Number of Transcripts", 
+                           title = "Average Number of Transcripts Across Genome Type") + 
+               theme(legend.position="none")
+
+virus_tidy %>% group_by(genome) %>% 
+               summarize(nt = sum(length)) %>% 
+               ggplot(aes(genome, nt, fill = genome)) + 
+                      geom_bar(stat = "identity") + 
+                      labs(xlab = "Genome Type",  
+                           ylab = "Total length (nt)", 
+                           title = "Total Length in nt for each Genome Type") + 
+                      theme(legend.position="none")
+
+virus_tidy %>% group_by(virus) %>% 
+               ggplot(aes(genome, length, fill = genome)) + 
+               geom_boxplot() + 
+               labs(xlab = "Genome Type", 
+                    ylab = "Average Transcript Length (nt)", 
+                    title = "Average Transcript Length Across Genome Type") + 
+               theme(legend.position="none")
+
+virus_tidy %>% group_by(genome, protein_type) %>% 
+               summarize(number = n()) %>% 
+               ggplot(aes(genome, number, fill = protein_type)) + 
+               geom_bar(stat = "identity", position = "dodge") + 
+               labs(xlab = "Genome Type", 
+                    ylab = "Number of Protein Type", 
+                    title = "Abundance of Protein Types Across Genome Types")
+
+virus_tidy %>% mutate(overlapping = ifelse(grepl("NA", virus_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>% 
+               group_by(genome, overlapping, fill = overlapping) %>% summarise(ifoverlapping = n()) %>% 
+               ggplot(aes(genome, ifoverlapping, fill = overlapping)) + 
+                      geom_bar(stat = "identity", position = "dodge") + 
+                      labs(xlab = "Genome Type", 
+                           ylab = "Number of Genes", 
+                           title = "Number of Overlapping and Non-overlapping Genes per Genome Type")
+
+genome_totals <- virus_tidy %>% 
+                 mutate(overlapping = ifelse(grepl("NA", virus_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>% 
+                 group_by(genome) %>% 
+                 summarise(total = n()) %>% 
+                 rbind(.,.) %>% 
+                 arrange(genome)  
+
+virus_tidy %>% mutate(overlapping = ifelse(grepl("NA", virus_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>% 
+               group_by(genome, overlapping) %>% 
+               summarise(ifoverlapping = n()) %>% 
+               left_join(.,genome_totals) %>% 
+               mutate(percent_overlap = ifoverlapping/total*100) %>% 
+               ggplot(aes(genome, percent_overlap, fill = overlapping)) + 
+                      geom_bar(stat = "identity", position = "dodge")
+
+virus_tidy %>% mutate(overlapping = ifelse(grepl("NA", virus_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>% 
+               group_by(virus, overlapping) %>% 
+               mutate(ifoverlapping = n()) %>% 
+               ggplot(aes(genome, ifoverlapping, fill = overlapping)) + 
+                      geom_boxplot() + 
+                      labs(xlab = "Genome Type", 
+                           ylab = "Average Number of Overlapping Genes", 
+                           title = "Average Overlapping Genes")
+
+virus_tidy %>% ggplot(aes(CAI, fill = "red")) + 
+                      geom_histogram() + 
+                      guides(fill = FALSE)
+
+virus_tidy %>% ggplot(aes(percent_opt, fill = "red")) + 
+                      geom_histogram() + 
+                      guides(fill = FALSE)
+```
+
+## linear model functions
+These functions help plot linear model statistics on top of ggplots. They can even be faceted.
+
+```{r, linear model stats on plot}
+lm_eqn <- function(x, y){
+    m <- lm(y ~ x);
+    f <- summary(m)$fstatistic;
+    
+    eq1 <- substitute(~~italic(r)^2~"="~r2*",",
+         list(a = format(coef(m)[1], digits = 2), 
+              b = format(coef(m)[2], digits = 2), 
+             r2 = format(summary(m)$r.squared, digits = 3)));
+    
+    eq2 <- substitute(~~italic(p)~"="~pval,
+         list(pval = as.character(format(pf(f[1], f[2], f[3], lower.tail = FALSE), digits = 3))));
+    
+   as.list(c(as.character(as.expression(eq1)), as.character(as.expression(eq2))));
+   } 
+
+facet_lm_eqn <- function(data, group, x, y){
+  i <- c(1:length(unique(group)))
+  p <- lapply(i, function(i) 
+      
+      p = as.double(unlist(data %>% 
+                           filter(group == sort(unique(group))[i]) %>% 
+                           select(x))))
+  q <- lapply(i, function(i)
+      q = as.double(unlist(data %>% 
+                           filter(group == sort(unique(group))[i]) %>% 
+                           select(y))))
+  label <- unlist(lapply(i, function(i)
+    lm_eqn(unlist(p[i]), unlist(q[i]))))
+  names(label) <- sort(rep(unique(group), 2))
+  unlist(label)
+  }
+
+
+```
+
+### Confirming Known Relationships
+
+In these plots we hoped to show an agreement between our two measurements of virus adaptiveness to human hosts, Codon Adaptability Index and Percent Optimal Codons. The agreement is highly significant which has previously been shown by other researchers.
+
+```{r, show CAI and percent_opt are well correlated }
+virus_tidy %>% ggplot(aes(CAI, percent_opt)) +
+      geom_point() + 
+      geom_smooth(method = lm, se = FALSE) + 
+      geom_text(aes(x = 0.79, y = 25), 
+                label = unlist(lm_eqn(virus_tidy$CAI, virus_tidy$percent_opt)[1]), 
+                parse = TRUE) + 
+      geom_text(aes(x = 0.79, y = 24), 
+                label = unlist(lm_eqn(virus_tidy$CAI, virus_tidy$percent_opt)[2]), 
+                parse = TRUE) + 
+      xlab("CAI") + 
+      ylab("Percent Optimal") + 
+      ggtitle("Relationship Between CAI and Percent Optimal")
+```
+
+These plots are intended to show consistency with the literature. It has previously been shown that as GC% increases, CAI decreases in a human model. Our data supports this trend suggesting our data is robust enough to draw conclusions from.
+Interestingly, -ssRNA viruses and unknown protein types show the opposite trend with GC and CAI but conform to the expected trend when percent optimal codons are considered.
+
+```{r, GC and CAI/percent_opt}
+virus_tidy %>% ggplot(aes(CAI, GC)) + 
+  geom_smooth(method = lm, se = FALSE) + 
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 0.79, y = 0.25), 
+            label = unlist(lm_eqn(virus_tidy$CAI, virus_tidy$GC)[1]), 
+            parse = TRUE) + 
+  geom_text(aes(x = 0.79, y = 0.22), 
+            label = unlist(lm_eqn(virus_tidy$CAI, virus_tidy$GC)[2]), 
+            parse = TRUE)
+
+
+label <- facet_lm_eqn(virus_tidy, virus_tidy$genome, "CAI", "GC")
+virus_tidy %>% ggplot(aes(CAI, GC)) + 
+  geom_smooth(method = lm, se = FALSE) + 
+  geom_point(aes(col = genome)) +
+  guides(col = FALSE) +
+  facet_grid(.~genome) + 
+  geom_text(aes(x, y, label = R2), 
+            parse = TRUE, 
+            data = data.frame(x = 0.79, 
+                              y = 0.25, 
+                              R2 = unlist(label)[seq(1, length(label), 2)], 
+                              genome = names(label[seq(1, length(label), 2)]))) + 
+  geom_text(aes(x, y, label = pval), 
+            parse = TRUE, 
+            data = data.frame(x = 0.79, 
+                              y = 0.22, 
+                              pval = unlist(label)[seq(2, length(label), 2)], 
+                              genome = names(label[seq(2, length(label), 2)])))
+
+
+
+label <- facet_lm_eqn(virus_tidy, virus_tidy$protein_type, "CAI", "GC")
+virus_tidy %>% ggplot(aes(CAI, GC)) + 
+  geom_smooth(method = lm, se = FALSE) + 
+  geom_point(aes(col = protein_type)) +
+  guides(col = FALSE) +
+  facet_grid(.~protein_type) + 
+  geom_text(aes(x, y, label = R2), 
+            parse = TRUE, 
+            data = data.frame(x = 0.79, 
+                              y = 0.25, 
+                              R2 = unlist(label)[seq(1, length(label), 2)], 
+                              protein_type = names(label[seq(1, length(label), 2)]))) + 
+  geom_text(aes(x, y, label = pval), 
+            parse = TRUE, 
+            data = data.frame(x = 0.79, 
+                              y = 0.22,
+                              pval = unlist(label)[seq(2, length(label), 2)], 
+                              protein_type = names(label[seq(2, length(label), 2)])))
+
+```
+
+This trend also stands when CAI is replaced with percent optimal codons.
+
+```{r, GC and percent_opt}
+virus_tidy %>% ggplot(aes(percent_opt, GC)) + 
+  geom_smooth(method = lm, se = FALSE) + 
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 37, y = 0.21), 
+            label = unlist(lm_eqn(virus_tidy$percent_opt, virus_tidy$GC)[1]), 
+            parse = TRUE) + 
+  geom_text(aes(x = 37, y = 0.18), 
+            label = unlist(lm_eqn(virus_tidy$percent_opt, virus_tidy$GC)[2]), 
+            parse = TRUE)
+
+label <- facet_lm_eqn(virus_tidy, virus_tidy$genome, "percent_opt", "GC")
+virus_tidy %>% ggplot(aes(percent_opt, GC)) + 
+  geom_smooth(method = lm, se = FALSE) + 
+  geom_point(aes(col = genome)) + 
+  guides(col = FALSE) +
+  facet_grid(.~genome) + 
+  geom_text(aes(x, y, label = R2), 
+            parse = TRUE, 
+            data = data.frame(x = 37, 
+                              y = 0.21, 
+                              R2 = unlist(label)[seq(1, length(label), 2)], 
+                              genome = names(label[seq(1, length(label), 2)]))) + 
+  geom_text(aes(x, y, label = pval), 
+            parse = TRUE, 
+            data = data.frame(x = 37, 
+                              y = 0.18, 
+                              pval = unlist(label)[seq(2, length(label), 2)], 
+                              genome = names(label[seq(2, length(label), 2)])))
+
+
+label <- facet_lm_eqn(virus_tidy, virus_tidy$protein_type, "percent_opt", "GC")
+virus_tidy %>% ggplot(aes(percent_opt, GC)) + 
+  geom_smooth(method = lm, se = FALSE) + 
+  geom_point(aes(col = protein_type)) +
+  guides(col = FALSE) +
+  facet_grid(.~protein_type) + 
+  geom_text(aes(x, y, label = R2), 
+            parse = TRUE, 
+            data = data.frame(x = 37, 
+                              y = 0.21, 
+                              R2 = unlist(label)[seq(1, length(label), 2)], 
+                              protein_type = names(label[seq(1, length(label), 2)]))) + 
+  geom_text(aes(x, y, label = pval), 
+            parse = TRUE, 
+            data = data.frame(x = 37, 
+                              y = 0.18, 
+                              pval = unlist(label)[seq(2, length(label), 2)], 
+                              protein_type = names(label[seq(2, length(label), 2)])))
+```
+
+### Testing our Hypotheses
+
+An initial question is if any trends arise in codon adaptability based on genome type.
+
+```{r, CAI/Percent_opt by Genome Type}
+virus_tidy %>% ggplot(aes(genome, CAI, fill = genome)) + 
+                     geom_boxplot() + 
+                     guides(fill = FALSE) + 
+                     geom_hline(aes(yintercept = mean(virus_tidy$CAI), 
+                                    linetype = "Viral"), 
+                                    color = "red") + 
+                     geom_hline(aes(yintercept = human_CAI, 
+                                    linetype = "Human"), 
+                                    color = "blue") + 
+                     scale_linetype_manual(name = "Average CAI", 
+                                           values = c(2, 2), 
+                                           guide = guide_legend(override.aes = list(color = c("blue", "red")))) + 
+                     stat_compare_means(label = "p.signif", 
+                                        method = "wilcox.test", 
+                                        ref.group = ".all.", 
+                                        hide.ns = TRUE) +
+                     labs(xlab = "Genome Type", 
+                          title = "significantly different from mean viral CAI", 
+                          caption = "All other genome types have significantly higher CAI averages than dsDNA viruses")
+
+my_comparisons <- list(c("-ssRNA", "+ssRNA"), 
+                       c("+ssRNA", "dsDNA"), 
+                       c("dsDNA", "retrovirus"), 
+                       c("-ssRNA", "dsDNA"), 
+                       c("+ssRNA", "retrovirus"), 
+                       c("-ssRNA", "retrovirus"))
+
+virus_tidy %>% ggplot(aes(genome, CAI, fill = genome)) + 
+                      geom_boxplot() +
+                      guides(fill = FALSE) + 
+                      stat_compare_means(comparisons = my_comparisons, 
+                                         method = "wilcox.test", 
+                                         label = "p.signif", 
+                                         hide.ns = TRUE) + 
+                      labs(title = "some pairwise comparisons", 
+                           xlab = "Genome Type")
+
+virus_tidy %>% ggplot(aes(genome, percent_opt, fill = genome)) + 
+                      geom_boxplot() +
+                      guides(fill = FALSE) + 
+                      geom_hline(aes(yintercept = mean(virus_tidy$percent_opt), 
+                                     linetype = "Virus"), 
+                                      color = "red") + 
+                      geom_hline(aes(yintercept = human_percent_opt, 
+                                     linetype = "Human"), 
+                                     color = "blue") + 
+                      scale_linetype_manual(name = "Average percent_opt", 
+                                            values = c(2, 2), 
+                                            guide = guide_legend(override.aes = list(color = c("blue", "red")))) +
+                      stat_compare_means(label = "p.signif", 
+                                         method = "wilcox.test", 
+                                         ref.group = ".all.", 
+                                         hide.ns = TRUE) +
+                      labs(title = "significantly different from mean viral percent_opt", 
+                           xlab = "Genome Type", 
+                           caption = "for percent_opt, only -ssRNA and retroviruses have significantly higher average percent_opts than the other Genome Types")
+
+virus_tidy %>% ggplot(aes(genome, percent_opt, fill = genome)) + 
+                      geom_boxplot() + 
+                      guides(fill = FALSE) + 
+                      stat_compare_means(method = "wilcox.test", 
+                                         comparisons = my_comparisons, 
+                                         label = "p.signif", 
+                                         hide.ns = TRUE) +
+                      labs(title = "some pariwise comparisons", xlab = "Genome Type")
+
+```
+
+Because dsDNA viral types are the only to contain Regulatory protein types, it was hypothesized that these alone are what cause dsDNA to be lower in the above to plots.
+
+```{r, no regulatory genes }
+virus_no_reg <- virus_tidy %>% 
+                filter(protein_type != "regulatory")
+
+virus_no_reg %>% ggplot(aes(genome, CAI, fill = genome)) + 
+                 geom_boxplot() +
+                 guides(fill = FALSE) + 
+                 geom_hline(aes(yintercept = mean(virus_no_reg$CAI), 
+                                linetype = "Virus"), 
+                                color = "red") + 
+                 geom_hline(aes(yintercept = human_CAI, 
+                                linetype = "Human"), 
+                                color = "blue") + 
+                 scale_linetype_manual(name = "Average CAI", 
+                                       values = c(2, 2), 
+                                       guide = guide_legend(override.aes = list(color = c("blue", "red")))) +
+                 stat_compare_means(label = "p.signif", 
+                                    method = "wilcox.test", 
+                                    ref.group = ".all.", 
+                                    hide.ns = TRUE) + 
+                 labs(title = "dsDNA without regulatory protein types",
+                      xlab = "Genome Type", 
+                      caption = "Regulatory proteins weren't lowering dsDNA's average CAI")
+
+virus_no_reg %>% ggplot(aes(genome, percent_opt, fill = genome)) + 
+                        geom_boxplot() +
+                        guides(fill = FALSE) + 
+                        geom_hline(aes(yintercept = mean(virus_no_reg$percent_opt), 
+                                       linetype = "Virus"), 
+                                        color = "red") + 
+                        geom_hline(aes(yintercept = human_percent_opt, 
+                                       linetype = "Human"), 
+                                       color = "blue") + 
+                        scale_linetype_manual(name = "Average percent_opt", 
+                                              values = c(2, 2), 
+                                              guide = guide_legend(override.aes = list(color = c("blue", "red")))) +
+                        stat_compare_means(label = "p.signif", 
+                                           method = "wilcox.test", 
+                                           ref.group = ".all.",
+                                           hide.ns = TRUE) + 
+                        labs(title = "dsDNA without regulatory protein types",
+                             xlab = "Genome Type", 
+                             caption = "Regulatory proteins weren't lowering dsDNA's average percent_opt")
+
+virus_tidy %>% filter(protein_type != "regulatory") %>% 
+               ggplot(aes(genome, CAI, fill = genome)) +
+                      geom_boxplot() + 
+                      guides(fill = FALSE) +
+                      stat_compare_means(comparisons = my_comparisons, 
+                                         method = "wilcox.test", 
+                                         label = "p.signif", 
+                                         hide.ns = TRUE) +
+                      labs(xlab = "Genome Type",
+                           title = "dsDNA without regulatory protein types")
+
+virus_tidy %>% filter(protein_type != "regulatory") %>% 
+               ggplot(aes(genome, percent_opt, fill = genome)) + 
+                      geom_boxplot() + 
+                      guides(fill = FALSE) +
+                      labs(title = "dsDNA without regulatory protein types",
+                           xlab = "Genome Type") + 
+                      stat_compare_means(comparisons = my_comparisons, 
+                                         method = "wilcox.test", 
+                                         label = "p.signif", 
+                                         hide.ns = TRUE)
+
+virus_col <- virus_tidy %>% 
+             mutate(col = ifelse(protein_type == "regulatory", "regulatory", "other"))
+
+virus_col %>% ggplot(aes(genome, CAI, col = col)) + 
+                     geom_boxplot(color = "black") + 
+                     guides(fill = FALSE) + 
+                     geom_point(aes(col = col, size = col), position = position_jitter()) + 
+                     xlab("Genome Type") + 
+                     scale_color_viridis(discrete=TRUE)
+
+virus_col %>% ggplot(aes(genome, percent_opt, col = col)) + 
+                     geom_boxplot(color = "black") + 
+                     guides(fill = FALSE) + 
+                     geom_point(aes(col = col, size = col), position = position_jitter()) + 
+                     xlab("Genome Type") + 
+                     scale_color_viridis(discrete=TRUE)
+
+```
+
+One of our first hypotheses was that overlapping genes would be more restricting in the viruses adaptation to it's human host. We expected overlapping genes to have a lower CAI/ percent_optimal than non-overlapping genes. This was not found to be true.
+
+```{r, overlapping genes }
+my_comparisons <- list(c("FALSE", "TRUE"))
+virus_tidy %>% mutate(overlapping = ifelse(grepl("NA", virus_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>% 
+               ggplot(aes(overlapping, CAI, fill = overlapping)) + 
+                      geom_boxplot() + 
+                      stat_compare_means(comparisons = my_comparisons, 
+                                         method = "wilcox.test") 
+
+virus_tidy %>% mutate(overlapping = ifelse(grepl("NA", virus_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>% 
+               ggplot(aes(overlapping, percent_opt, fill = overlapping)) + 
+               geom_boxplot() + 
+               stat_compare_means(comparisons = my_comparisons, 
+                                  method = "wilcox.test") 
+
+```
+
+If we assume we are correctly defining overlapping genes, then one explanation for our results is that overlapping genes encode proteins with similar functions thus requiring similar translation efficiencies and therefore similar CAI/ percent_optimality. This however only works for genes within the same frame.
+
+```{r, do overlapping genes have similar functions, warning=FALSE}
+neat_overlaps <- virus_tidy %>% 
+                 mutate(overlapping = ifelse(grepl("NA", virus_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>%
+                 select(virus, gene, protein_type, CAI, percent_opt, non_OPT_norm, overlap, overlapping, frame, strand) %>%
+                 separate(overlap, into = c("E1", "E2", "E3", "E4", "E5", "E6"), sep = ", ") %>% 
+                 gather(c(E1, E2, E3, E4, E5, E6), key = "key", value = "overlapping_genes") %>% 
+                 na.omit(overlapping_genes) %>% 
+                 mutate(overlapping_genes = ifelse(overlapping_genes == "NA", "NA", gsub("--.*", "", .$overlapping_genes)))
+
+x <- 1:nrow(neat_overlaps)
+overlapped_protein_type <- unlist(lapply(x, function(x) ifelse(neat_overlaps$overlapping_genes[x] == "NA", "NA", 
+        neat_overlaps[neat_overlaps$gene %in% neat_overlaps$overlapping_genes[x], ] %>%
+                  filter(virus == neat_overlaps$virus[x], key == neat_overlaps$key[x]) %>% 
+                  .$protein_type)))
+
+neat_overlaps <- neat_overlaps %>% mutate(overlapping_protein_type = overlapped_protein_type, 
+                                          same_overlap = ifelse(overlapping_protein_type == "NA", 
+                                                                "NA", overlapping_protein_type == protein_type))
+
+neat_overlaps %>% mutate(overlapping_protein_type = overlapped_protein_type, 
+                         same_overlap = ifelse(overlapping_protein_type == "NA", 
+                                               "NA", overlapping_protein_type == protein_type)) %>% 
+                  group_by(same_overlap) %>% 
+                  summarise(count = n()) %>% 
+                  .[c(1,3), ] %>% 
+                  ggplot(aes(same_overlap, count)) + 
+                         geom_bar(stat = "identity") + 
+                  labs(xlab = "Overlapping genes with same function",
+                       ylab = "number of occurances",
+                       title = "Do Overlapping Genes Have Similar Functions?")
+
+```
+
+A new definition of overlap now called "constrained" was utilized. Constrained genes overlap with another gene outside of their frame. This constrains their mutational ability as wobble positions of one gene's codons are not wobble positions of the other gene's codons. We supported our original hypothesis with this new definition.
+
+```{r, constrained overlaps, warning=FALSE}
+
+x <- 1:nrow(neat_overlaps)
+overlapped_frame <- unlist(lapply(x, function(x) ifelse(neat_overlaps$overlapping_genes[x] == "NA", "NA", 
+        neat_overlaps[neat_overlaps$gene %in% neat_overlaps$overlapping_genes[x], ] %>%
+                  filter(virus == neat_overlaps$virus[x], key == neat_overlaps$key[x]) %>% .$frame)))
+
+neat_overlaps %>% mutate(overlapping_frame = overlapped_frame, 
+                         constrained = ifelse(overlapping_frame == "NA", "NA", overlapping_frame != frame)) %>% 
+                  filter(constrained != "NA") %>% 
+                  ggplot(aes(constrained, CAI, fill = constrained)) + 
+                         geom_boxplot() + 
+                  labs(xlab = "Constrained Overlapping Genes",
+                       title = "CAI of constrained genes") + 
+                  stat_compare_means(comparisons = my_comparisons, 
+                                     method = "wilcox.test")
+
+neat_overlaps %>% mutate(overlapping_frame = overlapped_frame, 
+                         constrained = ifelse(overlapping_frame == "NA", "NA", overlapping_frame != frame)) %>%
+                  filter(constrained != "NA") %>% 
+                  ggplot(aes(constrained, percent_opt, fill = constrained)) + 
+                         geom_boxplot() + 
+                  labs(xlab = "Constrained Overlapping Genes",
+                       title = "Average Percent_opt of constrained genes") + 
+                  stat_compare_means(comparisons = my_comparisons, 
+                                     method = "wilcox.test")
+
+```
+
+We also hypothesized that structural protein types would have a higher CAI/ percent_opt than less abundant protein types such as enzymes or regulators. This was also unsupported by our data.
+
+```{r, affect of protein type on CAI}
+my_comparisons <- list(c("enzyme", "polyprotein"), c("polyprotein", "regulatory"), c("polyprotein", "structural"))
+
+virus_tidy %>% ggplot(aes(protein_type, CAI, fill = protein_type)) + 
+                      geom_boxplot() + 
+                      guides(fill = FALSE) + 
+                      geom_hline(aes(yintercept = mean(virus_tidy$CAI), 
+                                     linetype = "Virus"), 
+                                     color = "red") + 
+                      geom_hline(aes(yintercept = human_CAI, 
+                                     linetype = "Human"),
+                                     color = "blue") + 
+                      scale_linetype_manual(name = "Average CAI", 
+                                            values = c(2, 2), 
+                                            guide = guide_legend(override.aes = list(color = c("blue", "red")))) +
+                      stat_compare_means(comparisons = my_comparisons, 
+                                         method = "wilcox.test", 
+                                         label = "p.signif",
+                                         hide.ns = TRUE)
+
+virus_tidy %>% ggplot(aes(protein_type, CAI, fill = protein_type)) + 
+                      geom_boxplot() + 
+                      guides(fill = FALSE) + 
+                      geom_hline(aes(yintercept = mean(virus_tidy$CAI), 
+                                     linetype = "Virus"), 
+                                     color = "red") + 
+                      geom_hline(aes(yintercept = human_CAI, 
+                                     linetype = "Human"), 
+                                     color = "blue") + 
+                      scale_linetype_manual(name = "Average CAI", 
+                                            values = c(2, 2), 
+                                            guide = guide_legend(override.aes = list(color = c("blue", "red")))) +
+                      stat_compare_means(method = "wilcox.test", 
+                                         label = "p.signif", 
+                                         hide.ns = TRUE, 
+                                         ref.group = ".all.")
+
+virus_tidy %>% ggplot(aes(protein_type, percent_opt, fill = protein_type)) + 
+                      geom_boxplot() + 
+                      guides(fill = FALSE) + 
+                      geom_hline(aes(yintercept = mean(virus_tidy$percent_opt), 
+                                     linetype = "Virus"), 
+                                     color = "red") + 
+                      geom_hline(aes(yintercept = human_percent_opt, 
+                                     linetype = "Human"), 
+                                     color = "blue") + 
+                      scale_linetype_manual(name = "Average percent_opt", 
+                                            values = c(2, 2), 
+                                            guide = guide_legend(override.aes = list(color = c("blue", "red")))) + 
+                      stat_compare_means(comparisons = my_comparisons, 
+                                         method = "wilcox.test", 
+                                         label = "p.signif", 
+                                         hide.ns = TRUE) 
+
+virus_tidy %>% ggplot(aes(protein_type, percent_opt, fill = protein_type)) + 
+                      geom_boxplot() + 
+                      guides(fill = FALSE) +
+                      geom_hline(aes(yintercept = mean(virus_tidy$percent_opt), 
+                                     linetype = "Virus"), 
+                                     color = "red") + 
+                      geom_hline(aes(yintercept = human_percent_opt, 
+                                     linetype = "Human"), 
+                                     color = "blue") + 
+                      scale_linetype_manual(name = "Average percent_opt", 
+                                            values = c(2, 2), 
+                                            guide = guide_legend(override.aes = list(color = c("blue", "red")))) + 
+                      stat_compare_means(method = "wilcox.test", 
+                                         label = "p.signif",
+                                         hide.ns = TRUE, 
+                                         ref.group = ".all.") 
+
+```
+
+Host types determined by virus host data base (http://www.genome.jp/virushostdb/)
+
+Host type | Viruses
+----------|---------
+Human | HSV1, HepC, HIV1, HPV, mumps, HEA, RHIV, polio, HTLV2, AdenoV, vaccina, smallpox, EBV, CMV, chickenpox, rubella, measles, rotavirus1,      
+Primate | HepB, 
+Vertebrate | H1N1, H5N1, RABV, EBOLV, cowpox, marburg   
+Vert + Invert | WNV1, DENV, CHIKV, YFV, ZIKV
+
+```{r, host specificity}
+Vert_INV <- c("WNV1", "DENV", "CHIKV", "YFV", "ZIKV")
+Vertebrate <- c("H1N1", "H5N1", "RABV", "EBOLV", "cowpox", "marburg")
+
+my_comparisons <- list(c("human", "vertebrate"),
+                       c("human", "arbovirus"), 
+                       c("arbovirus", "vertebrate"))
+
+virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+               ggplot(aes(hosts, CAI, fill = hosts)) + 
+                      geom_boxplot() + 
+                      guides(fill = FALSE) + 
+                      stat_compare_means(comparisons = my_comparisons, 
+                                         method = "wilcox.test")
+
+virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+               ggplot(aes(hosts, percent_opt, fill = hosts)) + 
+                      geom_boxplot() + 
+                      guides(fill = FALSE) + 
+                      stat_compare_means(comparisons = my_comparisons, 
+                                         method = "wilcox.test")
+
+```
+
+Instead of overall CAI or percent_opt of a transcript determining it's translational efficiency, the longest stretch of non-optimal codons could play a stronger role in slowing or speeding the ribosome.
+
+```{r, length of longest non-OPT}
+virus_tidy %>% ggplot(aes(non_OPT_length, fill = "red")) + 
+                      geom_histogram() + 
+                      guides(fill = FALSE)
+
+virus_tidy %>% ggplot(aes(non_OPT_length, CAI)) + geom_point()
+virus_tidy %>% ggplot(aes(non_OPT_length, percent_opt, col = log10(length))) + geom_point() + scale_color_viridis()
+virus_tidy %>% ggplot(aes(non_OPT_length, percent_opt)) + geom_point()
+virus_tidy %>% ggplot(aes(non_OPT_length, CAI)) + geom_point()
+virus_tidy %>% ggplot(aes(non_OPT_length, percent_opt)) + geom_point()
+virus_tidy %>% ggplot(aes(genome, non_OPT_length, fill = genome)) + geom_boxplot() + guides(fill = FALSE)
+virus_tidy %>% ggplot(aes(protein_type, non_OPT_length, fill = protein_type)) + geom_boxplot() + guides(fill = FALSE)
+
+my_comparisons <- list(c("FALSE", "TRUE"))
+
+virus_tidy %>% mutate(overlapping = ifelse(grepl("NA", virus_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>% 
+               ggplot(aes(overlapping, non_OPT_length, fill = overlapping)) +
+               geom_boxplot() + 
+               stat_compare_means(comparisons = my_comparisons, 
+                                  method = "wilcox.test")
+
+neat_overlaps %>% mutate(overlapping_frame = overlapped_frame, 
+                         constrained = ifelse(overlapping_frame == "NA", "NA", overlapping_frame != frame)) %>%
+                  filter(constrained != "NA") %>% 
+                  ggplot(aes(constrained, non_OPT_length, fill = constrained)) + 
+                         geom_boxplot() + 
+                         xlab("Constrained Overlapping Genes") + 
+                         stat_compare_means(comparisons = my_comparisons,
+                                            method = "wilcox.test")
+
+virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+               ggplot(aes(hosts, non_OPT_length, fill = hosts)) + 
+               geom_boxplot() + 
+               guides(fill = FALSE)
+
+```
+
+### General Comparisons of the Viruses
+
+```{r, compare viruses}
+virus_tidy  %>% group_by(virus) %>% 
+                summarise_at(.vars = vars(CAI, percent_opt, GC), .funs = mean) %>% 
+                arrange(CAI)
+
+virus_tidy  %>% group_by(genome) %>% 
+                summarise_at(.vars = vars(CAI, percent_opt, GC), .funs = mean) %>% 
+                arrange(CAI)
+
+virus_tidy  %>% group_by(protein_type) %>% 
+                summarise_at(.vars = vars(CAI, percent_opt, GC), .funs = mean) %>% 
+                arrange(CAI)
+
+```
+
+```{r, bar plot, fig.width = 20}
+virus_tidy %>% ggplot(aes(virus, CAI, fill = genome)) + 
+                      geom_boxplot() + 
+                      theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                      guides(fill = FALSE) + 
+                      geom_hline(aes(yintercept = mean(virus_tidy$CAI), 
+                                     linetype = "Virus"), 
+                                     color = "red") + 
+                      geom_hline(aes(yintercept = human_CAI, 
+                                     linetype = "Human"), 
+                                     color = "blue") + 
+                      scale_linetype_manual(name = "Average CAI", 
+                                            values = c(2, 2), 
+                                            guide = guide_legend(override.aes = list(color = c("blue", "red"))))
+
+virus_tidy %>% ggplot(aes(virus, percent_opt, fill = genome)) + 
+                      geom_boxplot() +
+                      theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                      guides(fill = FALSE) + 
+                      geom_hline(aes(yintercept = mean(virus_tidy$percent_opt), 
+                                     linetype = "Virus"), 
+                                     color = "red") + 
+                      geom_hline(aes(yintercept = human_percent_opt, 
+                                     linetype = "Human"), 
+                                     color = "blue") + 
+                      scale_linetype_manual(name = "Average percent_opt", 
+                                            values = c(2, 2),
+                                            guide = guide_legend(override.aes = list(color = c("blue", "red"))))
+
+```
+
