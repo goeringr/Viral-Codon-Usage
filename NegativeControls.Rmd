@@ -1,0 +1,426 @@
+---
+title: "Negative Controls"
+author: "Rae G"
+date: "January 25, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(seqinr)
+library(tidyverse)
+library(qdapRegex)
+library(valr)
+library(ggpubr)
+library(cowplot)
+```
+
+## What am I trying to do?
+In this R markdown, codon adaptability of human viruses will be compared to several other species to act as negative controls. 
+
+## How do I intend to do it?
+W values have been previously calculated for yeast, drosophila and mouse. Human viral CAI will be calculated in these different species contexts.
+
+
+```{r, percent optimal }
+percent_opt <- function(seq, tissue_w){  
+          w_val <- readRDS("neg_ctrl_w.txt")
+          opt_counts <-
+          seqinr::count(s2c(as.character(seq)), 3) %>%
+          as_tibble() %>% 
+          left_join(., w_val, by = c("Var1" = "codon")) %>%
+          mutate(n_opt = ifelse(w_val %>% select(tissue_w) %>% unlist() %>% as.double() == 1, n, 0))
+          
+          sum(opt_counts$n_opt)/sum(opt_counts$n) * 100
+          }
+
+```
+
+```{r, find longest run}
+
+longest_non_OPT <- function(seq, species){
+          w_val <- readRDS("neg_ctrl_w.txt")
+          OPT <- w_val %>% 
+              select(codon, species) %>% 
+              filter(.[2] == 1.00) %>% 
+              select(codon) %>% 
+              unlist() %>% 
+              as.vector()
+          codon_count <- rle(strsplit(as.character(seq), "(?<=.{3})", perl = TRUE)[[1]] %in% OPT)
+          max(codon_count$lengths[codon_count$values == FALSE])
+          }
+
+```
+
+```{r, get data}
+get_neg_data <- function(file, virus, genome){
+  ## load in viral fasta file, w values and extract fasta annotations
+             dat <- read.fasta(file)
+             w <- readRDS("neg_ctrl_w.txt")
+             dat_annotation <- getAnnot(dat)
+  
+  ## generate a data frame from extracted annotation information, include raw sequence    
+             
+             dat_df <- data.frame(name = names(dat), 
+                                  gene = as.character(rm_between(dat_annotation, "[gene=", "] ", extract = TRUE)), 
+                                  protein = as.character(rm_between(dat_annotation, "[protein=", "] ", extract = TRUE)),
+                                  location = as.character(rm_between(dat_annotation, "[location=", "] ", extract = TRUE)),
+                                  seq = unlist(getSequence(dat, as.string = TRUE)))
+            
+  ## tidy this data frame while calculating new values (GC%, sequence length, codon adaptability index and tissue specific codon adaptability index)                    
+             dat_df_tidy <- dat_df %>% as_tibble() %>% 
+                            mutate(length = nchar(as.character(seq)), 
+                            GC = unlist(map(map(as.character(dat_df$seq), s2c), GC)), 
+                            virus = virus, 
+                            genome = genome, 
+                            CAI_human = unlist(map(map(as.character(dat_df$seq), s2c), cai, w$human, numcode = 1, zero.threshold = 0.0001, zero.to = 0.01)),
+                            CAI_yeast =  unlist(map(map(as.character(dat_df$seq), s2c), cai, w$yeast, numcode = 1, zero.threshold = 0.0001, zero.to = 0.01)),
+                            CAI_fly =  unlist(map(map(as.character(dat_df$seq), s2c), cai, w$fly, numcode = 1, zero.threshold = 0.0001, zero.to = 0.01)),
+                            CAI_mosquito =  unlist(map(map(as.character(dat_df$seq), s2c), cai, w$mosquito, numcode = 1, zero.threshold = 0.0001, zero.to = 0.01)),
+                            CAI_mouse =  unlist(map(map(as.character(dat_df$seq), s2c), cai, w$mouse, numcode = 1, zero.threshold = 0.0001, zero.to = 0.01)),
+                            
+  ## categorize proteins based on description: structural, enzyme, polyprotein or regulatory
+  ## unknown if description is not informative
+                            protein_type = ifelse(grepl("ase", dat_df$protein, fixed = TRUE), "enzyme", ifelse(grepl("regula", dat_df$protein, fixed = TRUE), "regulatory",ifelse(grepl("polyprotein", dat_df$protein, fixed = TRUE), "polyprotein", ifelse(nrow(dat_df) == 1, "polyprotein", "structural")))),
+                            protein_type = ifelse(protein_type == "structural" & length(unique(protein_type)) == 1, "unknown", protein_type),
+                            non_OPT_length_human = unlist(map(seq, longest_non_OPT, "human")),
+                            non_OPT_length_yeast = unlist(map(seq, longest_non_OPT, "yeast")),
+                            non_OPT_length_fly = unlist(map(seq, longest_non_OPT, "fly")),
+                            non_OPT_length_mosquito = unlist(map(seq, longest_non_OPT, "mosquito")),
+                            non_OPT_length_mouse = unlist(map(seq, longest_non_OPT, "mouse")),
+  
+                            percent_opt_human = unlist(map(seq, percent_opt, "human")),
+                            percent_opt_yeast = unlist(map(seq, percent_opt, "yeast")),
+                            percent_opt_fly = unlist(map(seq, percent_opt, "fly")),
+                            percent_opt_mosquito = unlist(map(seq, percent_opt, "mosquito")),
+                            percent_opt_mouse = unlist(map(seq, percent_opt, "mouse")),
+  
+                             
+  
+  ## strandedness is not utilized yet could improve detail of overlapping genes in DNA genomes 
+                            strand = ifelse(grepl("complement", dat_df$location, fixed = TRUE), "+", "-"), 
+  
+  ## location is separated into start and end by gene exons with dummy "chrom"" value for bed_intersect
+                            location = unlist(ifelse(grepl("complement", dat_df$location, fixed = TRUE), 
+                                                     rm_between(as.character(dat_df$location), "complement(", ")", extract = TRUE), 
+                                                     as.character(location)))) %>% 
+                            mutate(location = unlist(ifelse(grepl("join", dat_df$location, fixed = TRUE), 
+                                                            rm_between(as.character(dat_df$location), "join(", ")", extract = TRUE), 
+                                                            as.character(location)))) %>% 
+                            separate(location, into = c("E1", "E2", "E3", "E4", "E5", "E6"), sep = ",") %>% 
+                            gather(starts_with("E"), key = "exons", value = "location") %>% 
+                            filter(location != "NA") %>% 
+                            separate(location, into = c("start", "end"), by = "..") %>% 
+                            mutate(chrom = virus, start = as.integer(start), end = as.integer(end), frame = start %% 3)
+
+  ## if gene names aren't extracted correctly, they are numbered           
+             dat_df_tidy <- dat_df_tidy %>% mutate(gene = ifelse(is.na(gene), as.character(1:n()), as.character(gene)))
+
+  ## bed_intersect determines which gene exons overlap, removes overlaps with identical genes           
+             dat_overlaps <- bed_intersect(dat_df_tidy, dat_df_tidy) %>% 
+                             mutate(overlap = ifelse(start.x == start.y & end.x == end.y, NA, paste(gene.y, exons.y, sep = "--")),
+                                    geneexon.x = paste(gene.x, exons.x, sep = "--"))
+          
+         dat_overlaps <- aggregate(overlap ~ geneexon.x, na.action = na.pass, data = dat_overlaps, paste, collapse = ", ")
+         dat_overlaps <- dat_overlaps %>%
+           as_tibble %>% 
+           mutate(overlap = gsub("NA, NA", "NA", .$overlap)) %>%
+           mutate(overlap = gsub(", NA", "", .$overlap)) %>%
+           mutate(overlap = gsub("NA, ", "", .$overlap))
+             
+         dat_overlaps %>% separate(geneexon.x, into = c("gene", "exons"), sep = "--") %>%
+                              as_tibble() %>% 
+                              left_join(dat_df_tidy, ., by = c("gene", "exons")) %>% 
+                              as_tibble() %>% 
+                              select(virus, genome, gene, protein_type, protein, length, GC, CAI_human, CAI_yeast, CAI_fly,CAI_mosquito, CAI_mouse, percent_opt_human, percent_opt_yeast, percent_opt_fly,percent_opt_mosquito, percent_opt_mouse, non_OPT_length_human, non_OPT_length_yeast, non_OPT_length_fly, non_OPT_length_mosquito, non_OPT_length_mouse, overlap, start, end, strand, frame, seq)
+             
+}
+
+```
+
+```{r, neg viral data, warning=FALSE, message=FALSE }
+HSV1_tidy <- get_neg_data("HSV1.txt", "HSV1", "dsDNA")
+HepB_tidy <- get_neg_data("HepB.txt", "HepB", "dsDNA")
+HIV1_tidy <- get_neg_data("HIV1.txt", "HIV1", "retrovirus")
+HPV_tidy <- get_neg_data("HPV.txt", "HPV", "dsDNA")
+mumps_tidy <- get_neg_data("mumps.txt", "mumps", "-ssRNA")
+WNV1_tidy <- get_neg_data("WNV1.txt", "WNV1", "+ssRNA")
+ZIKV_tidy <- get_neg_data("zika.txt", "ZIKV", "+ssRNA")
+H5N1_tidy <- get_neg_data("H5N1.txt", "H5N1", "-ssRNA")
+H1N1_tidy <- get_neg_data("H1N1.txt", "H1N1", "-ssRNA")
+CHIKV_tidy <- get_neg_data("chikungunya.txt", "CHIKV", "+ssRNA")
+DENV_tidy <- get_neg_data("dengue.txt", "DENV", "+ssRNA")
+HEA_tidy <- get_neg_data("enterovirus A.txt", "HEA", "+ssRNA")
+HepC_tidy <- get_neg_data("HepC.txt", "HepC", "+ssRNA")
+RABV_tidy <- get_neg_data("rabies.txt", "RABV", "-ssRNA")
+RhinoV_tidy <- get_neg_data("RhinoV.txt", "RHIV", "+ssRNA")
+EBOLV_tidy <- get_neg_data("ebola.txt", "EBOLV", "-ssRNA")
+cowpox_tidy <- get_neg_data("Cowpox.txt", "cowpox", "dsDNA")
+polio_tidy <- get_neg_data("polio.txt", "polio", "+ssRNA")
+HTLV2_tidy <- get_neg_data("Human T-lymphotropic virus 2.txt", "HTLV2", "retrovirus")
+AdenoV_tidy <- get_neg_data("Adeno-associatedV2.txt", "AdenoV", "dsDNA")
+Vaccina_tidy <- get_neg_data("Vaccina.txt", "vaccina", "dsDNA")
+smallpox_tidy <- get_neg_data("smallpox.txt", "smallpox", "dsDNA")
+YFV_tidy <- get_neg_data("YellowFever.txt", "YFV", "+ssRNA")
+EBV_tidy <- get_neg_data("EBV.txt", "EBV", "dsDNA")
+CMV_tidy <- get_neg_data("CMV.txt", "CMV", "dsDNA")
+chickenpox_tidy <- get_neg_data("chickenpox.txt", "chickenpox", "dsDNA")
+rubella_tidy <- get_neg_data("rubella.txt", "rubella", "+ssRNA")
+MeV_tidy <- get_neg_data("measles.txt", "measles", "-ssRNA")
+rotaV1_tidy <- get_neg_data("RotaV1.txt", "rotavirus1", "dsDNA")
+marburg_tidy <- get_neg_data("marburg.txt", "marburg", "-ssRNA")
+
+virus_neg_tidy <- rbind(HSV1_tidy, HepB_tidy, HIV1_tidy, HPV_tidy, mumps_tidy, WNV1_tidy, ZIKV_tidy, H5N1_tidy, H1N1_tidy, CHIKV_tidy, DENV_tidy, HEA_tidy, HepC_tidy, RABV_tidy, RhinoV_tidy, EBOLV_tidy, cowpox_tidy, polio_tidy, HTLV2_tidy, AdenoV_tidy, Vaccina_tidy, smallpox_tidy, YFV_tidy, EBV_tidy, CMV_tidy, chickenpox_tidy, rubella_tidy, MeV_tidy, rotaV1_tidy, marburg_tidy)
+
+saveRDS(virus_neg_tidy, "virus_neg_tidy.txt")
+
+```
+
+### PCA plots
+These plots show the differences in codon usage (W values) in the different species as compared to human and several human tissues.
+
+```{r, neg control PCA, message=FALSE}
+neg_ctrl_w <- readRDS("neg_ctrl_w.txt")
+HEK_w <- readRDS("HEK_w.txt")
+tissue_w <- readRDS("tissue_w.txt")
+w <- left_join(tissue_w, HEK_w)
+w <- left_join(w, neg_ctrl_w)
+
+PCw_neg <-as.data.frame(prcomp(neg_ctrl_w[3:7])[2])
+PCw_neg %>% ggplot(aes(rotation.PC1, rotation.PC2, col = rownames(.), label = rownames(.))) + 
+                   geom_point() + 
+                   geom_text(aes(label = rownames(.)))
+
+PCw <-as.data.frame(prcomp(w[3:16])[2])
+PCw %>% ggplot(aes(rotation.PC1, rotation.PC2, col = rownames(.), label = rownames(.))) + 
+               geom_point() + 
+               geom_text(aes(label = rownames(.)))
+
+```
+
+This plot confirms that human viruses are most adapted to human codon usage.
+
+```{r, CAI}
+virus_neg_tidy <- readRDS("virus_neg_tidy.txt")
+virus_neg_tidy <- virus_neg_tidy %>% 
+                  gather(CAI_human, CAI_yeast, CAI_fly, CAI_mosquito, CAI_mouse, key = "CAI_Species", value = "CAI") %>%
+                  gather(percent_opt_human, percent_opt_yeast, percent_opt_fly, percent_opt_mosquito,  percent_opt_mouse, key = "P_O_Species", value = "percent_opt") %>% 
+                  gather(non_OPT_length_human, non_OPT_length_yeast, non_OPT_length_fly, non_OPT_length_mosquito, non_OPT_length_mouse, key = "non_OPT_Species", value = "non_OPT_length")
+
+
+virus_neg_tidy %>% ggplot(aes(CAI_Species, CAI, fill = CAI_Species)) + 
+                          geom_boxplot() + 
+                          guides(fill = FALSE) + 
+                          labs(x = "", 
+                               title = "Average CAI for different species")
+
+virus_neg_tidy %>% ggplot(aes(P_O_Species, percent_opt, fill = P_O_Species)) + 
+                          geom_boxplot() + 
+                          guides(fill = FALSE) + 
+                          labs(x = "", 
+                               title = "Average percent_opt for different species")
+
+```
+
+```{r, }
+lm_eqn <- function(x, y){
+    m <- lm(y ~ x);
+    f <- summary(m)$fstatistic;
+    eq1 <- substitute(~~italic(r)^2~"="~r2*",",
+         list(a = format(coef(m)[1], digits = 2), 
+              b = format(coef(m)[2], digits = 2), 
+             r2 = format(summary(m)$r.squared, digits = 3)));
+    eq2 <- substitute(~~italic(p)~"="~pval,
+         list(pval = as.character(format(pf(f[1],f[2],f[3],lower.tail=FALSE), digits = 3))));
+   as.list(c(as.character(as.expression(eq1)), as.character(as.expression(eq2))));
+   } 
+
+facet_lm_eqn <- function(data, group, x, y){
+  i <- c(1:length(unique(group)))
+  
+  p <- lapply(i, function(i) 
+  p = as.double(unlist(data %>% filter(group == sort(unique(group))[i]) %>% select(x))))
+  q <- lapply(i, function(i)
+  q = as.double(unlist(data %>% filter(group == sort(unique(group))[i]) %>% select(y))))
+  label <- unlist(lapply(i, function(i)
+    lm_eqn(unlist(p[i]), unlist(q[i]))))
+  names(label) <- sort(rep(unique(group),2))
+  unlist(label)
+  }
+
+```
+
+Here are some comparisons of GC trends with CAI for each species.
+
+```{r, GC and CAI }
+label <- facet_lm_eqn(virus_neg_tidy, virus_neg_tidy$CAI_Species, "CAI", "GC")
+virus_neg_tidy %>% ggplot(aes(CAI, GC)) + 
+  geom_smooth(method = lm, se = FALSE) + 
+  geom_point(aes(col = virus)) + 
+  facet_grid(. ~ CAI_Species) +
+  geom_text(aes(x, y, label = R2), 
+            parse = TRUE, 
+            data = data.frame(x = 0.79, 
+                              y = 0.25, 
+                              R2 = unlist(label)[seq(1, length(label), 2)], 
+                              CAI_Species = names(label[seq(1, length(label), 2)]))) + 
+  geom_text(aes(x, y, label = pval), 
+            parse = TRUE, 
+            data = data.frame(x = 0.79, 
+                              y = 0.22, 
+                              pval = unlist(label)[seq(2, length(label), 2)], 
+                              CAI_Species = names(label[seq(2, length(label), 2)])))
+```
+
+```{r, GC and percent_opt}
+label <- facet_lm_eqn(virus_neg_tidy, virus_neg_tidy$P_O_Species, "percent_opt", "GC")
+virus_neg_tidy %>% ggplot(aes(percent_opt, GC)) + 
+  geom_smooth(method = lm, se = FALSE) + 
+  geom_point(aes(col = virus)) + 
+  facet_grid(. ~ P_O_Species) +
+  geom_text(aes(x, y, label = R2), 
+            parse = TRUE, 
+            data = data.frame(x = 37, 
+                              y = 0.21, 
+                              R2 = unlist(label)[seq(1, length(label), 2)], 
+                              P_O_Species = names(label[seq(1, length(label), 2)]))) + 
+  geom_text(aes(x, y, label = pval), 
+            parse = TRUE, 
+            data = data.frame(x = 37, 
+                              y = 0.18, 
+                              pval = unlist(label)[seq(2, length(label), 2)], 
+                              P_O_Species = names(label[seq(2, length(label), 2)])))
+  
+```
+
+Many plots are repeated from viralCAIanalysis.rmd
+
+```{r, general trends}
+virus_neg_tidy %>% ggplot(aes(genome, CAI, fill = genome)) + 
+                          geom_boxplot() +
+                          xlab("Genome Type") +
+                          guides(fill = FALSE) + 
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) +
+                          facet_grid(. ~ CAI_Species)
+
+virus_neg_tidy %>% ggplot(aes(genome, percent_opt, fill = genome)) +
+                          geom_boxplot() + 
+                          xlab("Genome Type") + 
+                          guides(fill = FALSE) + 
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                          facet_grid(. ~ P_O_Species)
+
+```
+
+The CAI of the constrained genes supports our hypothesis that constrained genes have lower CAI as this trend is observed in humans and mouse but the trend is reversed in yeast. 
+
+```{r, constrained genes, warning=FALSE}
+neat_overlaps <- virus_neg_tidy %>% 
+  mutate(overlapping = ifelse(grepl("NA", virus_neg_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>%
+  select(virus, gene, protein_type, CAI, CAI_Species, percent_opt, P_O_Species, overlap, overlapping, frame, strand) %>%
+  separate(overlap, into = c("E1", "E2", "E3", "E4", "E5", "E6"), sep = ", ") %>% 
+  gather(c(E1, E2, E3, E4, E5, E6), key = "key", value = "overlapping_genes") %>% 
+  na.omit(overlapping_genes) %>% 
+  mutate(overlapping_genes = ifelse(overlapping_genes == "NA", "NA", gsub("--.*", "", .$overlapping_genes)))
+                                    
+x <- 1:nrow(neat_overlaps)
+overlapped_frame <- unlist(lapply(x, function(x) ifelse(neat_overlaps$overlapping_genes[x] == "NA", "NA", 
+        neat_overlaps[neat_overlaps$gene %in% neat_overlaps$overlapping_genes[x], ] %>%
+                  filter(virus == neat_overlaps$virus[x], key == neat_overlaps$key[x]) %>% .$frame)))
+
+neat_overlaps %>% mutate(overlapping_frame = overlapped_frame, constrained = 
+                           ifelse(overlapping_frame == "NA", "NA", overlapping_frame != frame)) %>% 
+                  filter(constrained != "NA") %>% 
+                  ggplot(aes(constrained, CAI, fill = constrained)) + 
+                         geom_boxplot() + 
+                         facet_grid(. ~ CAI_Species) +
+                         xlab("Constrained Overlapping Genes") + 
+                         ggtitle("CAI of constrained genes")
+
+neat_overlaps %>% mutate(overlapping_frame = overlapped_frame, constrained = 
+                           ifelse(overlapping_frame == "NA", "NA", overlapping_frame != frame)) %>% 
+                  filter(constrained != "NA") %>% 
+                  ggplot(aes(constrained, percent_opt, fill = constrained)) + 
+                         geom_boxplot() +
+                         facet_grid(. ~ P_O_Species) + 
+                         xlab("Constrained Overlapping Genes") + 
+                         ggtitle("Percent_opt of constrained genes")
+
+```
+
+```{r, protein types}
+virus_neg_tidy %>% ggplot(aes(protein_type, CAI, fill = protein_type)) +
+                          geom_boxplot() + guides(fill = FALSE) + 
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) +
+                          facet_grid(. ~ CAI_Species)
+
+virus_neg_tidy %>% ggplot(aes(protein_type, percent_opt, fill = protein_type)) + 
+                          geom_boxplot() + guides(fill = FALSE) + 
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                          facet_grid(. ~ P_O_Species)
+
+```
+
+```{r, }
+Vert_INV <- c("WNV1", "DENV", "CHIKV", "YFV", "ZIKV")
+Vertebrate <- c("H1N1", "H5N1", "RABV", "EBOLV", "cowpox", "marburg")
+
+virus_neg_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus",
+                                         ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>%
+                   ggplot(aes(hosts, CAI, fill = hosts)) +
+                          geom_boxplot() + 
+                          guides(fill = FALSE) + 
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) +
+                          facet_grid(. ~ CAI_Species)
+
+virus_neg_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                         ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+                   ggplot(aes(hosts, percent_opt, fill = hosts)) + 
+                   geom_boxplot() + guides(fill = FALSE) + 
+                   theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                   facet_grid(. ~ P_O_Species)
+```
+
+```{r, longest non opt stretch}
+virus_neg_tidy %>% ggplot(aes(genome, non_OPT_length, fill = genome)) + 
+                          geom_boxplot() + 
+                          guides(fill = FALSE) +
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                          facet_grid(. ~ non_OPT_Species)
+
+virus_neg_tidy %>% ggplot(aes(protein_type, non_OPT_length, fill = protein_type)) + 
+                          geom_boxplot() + 
+                          guides(fill = FALSE) +
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) +
+                          facet_grid(. ~ non_OPT_Species)
+
+my_comparisons <- list(c("FALSE", "TRUE"))
+virus_neg_tidy %>% mutate(overlapping = ifelse(grepl("NA", virus_neg_tidy$overlap, fixed = TRUE), "FALSE", "TRUE")) %>%  
+                   ggplot(aes(overlapping, non_OPT_length, fill = overlapping)) + 
+                          geom_boxplot() +
+                          stat_compare_means(comparisons = my_comparisons, method = "wilcox.test") + 
+                          facet_grid(. ~ non_OPT_Species)
+
+neat_overlaps <- readRDS("neat_overlaps.txt")
+overlapped_frame <- readRDS("overlapped_frame.txt")
+
+neat_overlaps %>% mutate(overlapping_frame = overlapped_frame,
+                         constrained = ifelse(overlapping_frame == "NA", "NA", overlapping_frame != frame)) %>%
+                         filter(constrained != "NA") %>% 
+                         ggplot(aes(constrained, non_OPT_length, fill = constrained)) + 
+                                geom_boxplot() + 
+                                xlab("Constrained Overlapping Genes") +
+                                stat_compare_means(comparisons = my_comparisons, method = "wilcox.test") + 
+                                facet_grid(. ~ non_OPT_Species)
+
+virus_neg_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                         ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+                   ggplot(aes(hosts, non_OPT_length, fill = hosts)) + 
+                          geom_boxplot() +
+                          guides(fill = FALSE) + 
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                          facet_grid(. ~ non_OPT_Species)
+
+```
+
+
