@@ -1,0 +1,461 @@
+---
+title: "An Arbovirus Story"
+author: "Rae G"
+date: "February 1, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(cowplot)
+library(ggpubr)
+library(seqinr)
+library(viridis)
+library(GGally)
+
+```
+
+## What am I trying to do?
+This R Markdown is intended to explore the relationship Arboviruses have with human and mosquito codon usage. These viruses are highly adapted to both species and don't seem to be limited in their adaptability due to their multi-host life cycle. This was not expected especially since arboviruses have greater adaptation to humans than some human-only viruses. 
+
+## How do I intend to do it?
+Here we will define codon usage differences between humans and mosquitoes and see if arboviruses are using those codons differently than other viruses. 
+
+```{r, warning=FALSE}
+neg_w <- readRDS("neg_ctrl_w.txt")
+virus_tidy <- readRDS("virus_tidy.txt")
+virus_neg_tidy <- readRDS("virus_neg_tidy.txt")
+
+```
+
+Here codon optimalities of human and mosquito are plotted for each codon. They are ordered by the difference between human and mosquito usage. 
+
+```{r, warning=FALSE}
+ggcorr(neg_w)
+
+order <- neg_w[c(1,3,6)] %>% as_tibble() %>% mutate(diff = human - mosquito, codon = as.factor(codon)) %>% arrange(desc(diff)) %>% .$codon
+
+neg_w[c(1,3,6)] %>% as_tibble() %>% mutate(diff = human - mosquito, codon = as.factor(codon)) %>% 
+                    arrange(desc(diff)) %>% gather(human, mosquito, key = species, value = w) %>% 
+                    ggplot(aes(factor(codon, levels = order), w, fill = species)) + 
+                           geom_bar(stat = "identity", position = "dodge") + 
+                           theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                           labs(x = "codon", title = "Human and Mosquito w Values for Each Codon")
+
+```
+
+Host types determined by virus host data base (http://www.genome.jp/virushostdb/)
+
+Host type | Viruses
+----------|---------
+Human | HSV1, HepC, HIV1, HPV, mumps, HEA, RHIV, polio, HTLV2, AdenoV, vaccina, smallpox, EBV, CMV, chickenpox, rubella, measles, rotavirus1, HepB 
+Vertebrate | H1N1, H5N1, RABV, EBOLV, cowpox, marburg   
+Vert + Invert | WNV1, DENV, CHIKV, YFV, ZIKV
+
+```{r, warning=FALSE}
+Vert_INV <- c("WNV1", "DENV", "CHIKV", "YFV", "ZIKV")
+Vertebrate <- c("H1N1", "H5N1", "RABV", "EBOLV", "cowpox", "marburg")
+
+virus_neg_tidy <- virus_neg_tidy %>% gather(CAI_human, CAI_yeast, CAI_fly, CAI_mosquito, CAI_mouse, 
+                                            key = "CAI_Species", 
+                                            value = "CAI") %>% 
+                                     gather(percent_opt_human, percent_opt_yeast, percent_opt_fly, percent_opt_mosquito,  percent_opt_mouse, 
+                                            key = "P_O_Species", 
+                                            value = "percent_opt") %>% 
+                                     gather(non_OPT_length_human, non_OPT_length_yeast, non_OPT_length_fly, non_OPT_length_mosquito, non_OPT_length_mouse, 
+                                            key = "non_OPT_Species", 
+                                            value = "non_OPT_length") 
+
+virus_neg_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                         ifelse(virus %in% Vertebrate, "vertebrate", "human")))  %>% 
+                   group_by(virus, hosts, CAI_Species) %>% 
+                   filter(hosts == "arbovirus", 
+                          CAI_Species == c("CAI_human", "CAI_mosquito")) %>% 
+                   summarize(mean_CAI = mean(CAI)) %>%  
+                   ggplot(aes(virus, mean_CAI, fill = CAI_Species)) + 
+                              geom_bar(stat = "identity", position = "dodge") + 
+                              labs(title = "Human and Mosquito CAI similar in Arboviruses")
+
+virus_neg_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                         ifelse(virus %in% Vertebrate, "vertebrate", "human")))  %>% 
+                   group_by(virus, hosts, CAI_Species) %>% 
+                   filter(hosts == "arbovirus", 
+                          CAI_Species == c("CAI_human", "CAI_mosquito", "CAI_yeast")) %>% 
+                   summarize(mean_CAI = mean(CAI)) %>%  
+                   ggplot(aes(virus, mean_CAI, fill = CAI_Species)) + 
+                          geom_bar(stat = "identity", position = "dodge") + 
+                          labs(title = "Arboviruses do not have high yeast CAI")
+
+virus_neg_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                         ifelse(virus %in% Vertebrate, "vertebrate", "human")))  %>% 
+                   group_by(virus, hosts, CAI_Species) %>% 
+                   filter(hosts == "human", 
+                          CAI_Species == c("CAI_human", "CAI_mosquito", "CAI_yeast")) %>% 
+                   summarize(mean_CAI = mean(CAI)) %>%  
+                   ggplot(aes(virus, mean_CAI, fill = CAI_Species)) + 
+                          geom_bar(stat = "identity", position = "dodge") + 
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                          labs(title = "human and mosquito have similar CAIs in human-only viruses as well")
+
+virus_neg_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                         ifelse(virus %in% Vertebrate, "vertebrate", "human")))  %>% 
+                   group_by(virus, hosts, CAI_Species) %>% 
+                   filter(hosts == "human", 
+                          CAI_Species == c("CAI_human", "CAI_mosquito", "CAI_fly")) %>%
+                   summarize(mean_CAI = mean(CAI)) %>%  
+                   ggplot(aes(virus, mean_CAI, fill = CAI_Species)) + 
+                          geom_bar(stat = "identity", position = "dodge") +
+                          theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                          labs(title = "human and mosquito have similar CAIs in human-only viruses as well")
+
+```
+
+Some literature has mentioned the importance of GC% driving codon adaptability where the relationship is not proportional. However, this trend doesn't hold for our viral host categories.
+
+```{r,}
+my_comparisons <- list(c("arbovirus", "human"),
+                    c("arbovirus", "vertebrate"),
+                    c("human", "vertebrate"))
+
+virus_neg_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                         ifelse(virus %in% Vertebrate, "vertebrate", "human")))  %>% 
+                   group_by(virus, hosts, CAI_Species) %>% 
+                   ggplot(aes(hosts, GC, fill = hosts)) + 
+                   geom_boxplot() + 
+                   guides(fill = FALSE) + 
+                   stat_compare_means(comparisons = my_comparisons, method = "wilcox.test")
+
+```
+
+```{r, mean RSCU}
+mean_RSCU <- function(seqs){
+               z <- lapply(lapply(lapply(seqs, s2c), 
+               uco, frame = 0, 
+               index = c("eff", "freq", "rscu"),
+               as.data.frame = TRUE, 
+               NA.rscu = NA), 
+               subset.data.frame, select = "RSCU")
+
+               RSCU <- z %>% lapply(as.matrix) %>% as.data.frame() %>% rowMeans(na.rm = TRUE) %>% as.data.frame() 
+               colnames(RSCU) <- "RSCU"
+               RSCU
+               }  
+
+```
+
+W values were calculated for each viral host category
+
+```{r, virus w}
+AA_codon <- readRDS("AA_codon.txt")
+get_host_w <- function(host){
+    host_RSCU <- virus_tidy %>%  
+        mutate(seq = as.character(seq)) %>%
+        mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>%
+        filter(hosts == host) %>% 
+        select(seq) %>% as.character() %>% 
+        mean_RSCU()
+      
+    host_RSCU <- host_RSCU %>% rownames_to_column(var = "codon") %>% mutate(AA = AA_codon$AA) 
+
+    max_host_RSCU <- host_RSCU %>% 
+                     mutate(AA = AA_codon$AA) %>%  
+                    group_by(AA) %>% 
+                    summarize_at(.vars = "RSCU", .funs = max)
+    
+    host_w <- inner_join(host_RSCU, max_host_RSCU, by = "AA") 
+    host_w <- host_w %>% mutate(w = RSCU.x / RSCU.y) %>% select(codon, AA, w)
+    }
+
+arbo_w <- get_host_w("arbovirus")
+vert_w <- get_host_w("vertebrate")
+human_w <- get_host_w("human")
+
+viral_w <- cbind(arbo_w, vert_w$w, human_w$w)
+colnames(viral_w) <- c("codon", "AA", "arbovirus", "vertebrate", "humans")
+
+```
+
+The occurrence of each codon was also tallied for each viral host category.
+
+```{r, virus codon counts}
+arbo_codons <- (virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+                               filter(hosts == "arbovirus") %>% 
+                               summarise(nts = sum(length)))/3
+
+vert_codons <- (virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+                               filter(hosts == "vertebrate") %>% 
+                               summarise(nts = sum(length)))/3
+
+human_codons <- (virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                                      ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>%
+                                filter(hosts == "human") %>% 
+                                summarise(nts = sum(length)))/3
+
+arbo_cts <- virus_tidy %>% mutate(seq = as.character(seq)) %>% 
+                           mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                                 ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+                           filter(hosts == "arbovirus") %>% 
+                           select(seq) %>% 
+                           as.character() %>% 
+                           s2c() %>% 
+                           seqinr::count(., 3) %>% 
+                           as_tibble()
+
+vert_cts <- virus_tidy %>% mutate(seq = as.character(seq)) %>%
+                           mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                                 ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+                           filter(hosts == "vertebrate") %>% 
+                           select(seq) %>% 
+                           as.character() %>% 
+                           s2c() %>% 
+                           seqinr::count(., 3) %>% 
+                           as_tibble()
+
+human_cts <- virus_tidy %>% mutate(seq = as.character(seq)) %>% 
+                            mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                                  ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>%
+                            filter(hosts == "human") %>% 
+                            select(seq) %>% 
+                            as.character() %>% 
+                            s2c() %>% 
+                            seqinr::count(., 3) %>% 
+                            as_tibble()
+
+viral_cts <- cbind(arbo_cts, vert_cts$n, human_cts$n)
+colnames(viral_cts) <- c("codon", "arbovirus", "vertebrate", "humans")
+
+viral_cts <- viral_cts %>% as_tibble() %>% 
+                           mutate(arb_norm = arbovirus / as.integer(arbo_codons), 
+                                  vert_norm = vertebrate / as.integer(vert_codons), 
+                                  human_norm = humans / as.integer(human_codons))
+
+```
+
+In an attempt to visualize viral codon usage and any bias toward human or mosquito usage, several plots were made using viral W values, codon counts and percentage of codon counts. It was expected that arboviruses would favor mosquito codons however this was not found to be supported.
+
+```{r, }
+neg_w[c(1,3,6)] %>% as_tibble() %>% 
+                    cbind(viral_w[3:5]) %>% 
+                    mutate(diff = human - mosquito, codon = as.factor(codon)) %>% 
+                    arrange(desc(diff)) %>% 
+                    gather(human, mosquito, key = species, value = w) %>% 
+                    gather(arbovirus, vertebrate, humans, key = "hosts", value = "ws") %>% 
+                    ggplot(aes(factor(codon, levels = order), w, fill = species)) +
+                           geom_bar(stat = "identity", position = "dodge") + 
+                           geom_line(aes(codon, ws, group = hosts, col = hosts), size = 2) +
+                           theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                           labs(x = "codon", 
+                                title = "Human and Mosquito w Values for Each Codon", 
+                                subtitle = "w values for each virus plotted on top") + 
+                           scale_fill_grey()
+
+neg_w[c(1,3,6)] %>% as_tibble() %>% 
+                    cbind(viral_cts[2:4]) %>%
+                    mutate(diff = human - mosquito, codon = as.factor(codon)) %>% 
+                    arrange(desc(diff)) %>% gather(human, mosquito, key = species, value = w) %>% 
+                    gather(arbovirus, vertebrate, humans, key = "hosts", value = "cts") %>% 
+                    ggplot(aes(factor(codon, levels = order), w, fill = species)) + 
+                           geom_bar(stat = "identity", position = "dodge") + 
+                           geom_line(aes(codon, cts, group = hosts, col = hosts), size = 2) + 
+                           theme(axis.text.x = element_text(angle=60, hjust=1)) +
+                           labs(x = "codon", 
+                                title = "Human and Mosquito w Values for Each Codon", 
+                                subtitle = "total codon counts fore each virus plotted on top") + 
+                           scale_fill_grey() + 
+                           scale_y_log10()
+
+neg_w[c(1,3,6)] %>% as_tibble() %>% 
+                    cbind(viral_cts[5:7]) %>% 
+                    mutate(diff = human - mosquito, codon = as.factor(codon)) %>%
+                    arrange(desc(diff)) %>% gather(human, mosquito, key = species, value = w) %>% 
+                    gather(arb_norm, vert_norm, human_norm, key = "hosts", value = "cts_norm") %>% 
+                    ggplot(aes(factor(codon, levels = order), w, fill = species)) + 
+                           geom_bar(stat = "identity", position = "dodge") +
+                           geom_line(aes(codon, cts_norm, group = hosts, col = hosts), size = 2) + 
+                           theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                           labs(x = "codon", 
+                                title = "Human and Mosquito w Values for Each Codon",
+                                subtitle = "normalized codon counts for each virus") + 
+                           scale_fill_grey()
+
+```
+
+Since codons were not being favored, it was thought that Amino Acids (AA) could be favored between human and mosquito systems. This hypothesis did not hold.
+
+```{r, }
+AA_codon <- readRDS("AA_codon.txt")
+
+neg_w_AA <- neg_w[c(1,3,6)] %>% 
+            as_tibble() %>% 
+            mutate(AA = AA_codon$AA) %>% 
+            group_by(AA) %>% 
+            summarise(human_mean = mean(human), 
+                      mosq_mean = mean(mosquito))
+
+order_AA <- neg_w_AA %>% 
+            mutate(diff = human_mean - mosq_mean, AA = as.factor(AA)) %>% 
+            arrange(desc(diff)) %>% 
+            .$AA
+
+viral_AA <- viral_cts %>% 
+            mutate(AA = AA_codon$AA) %>%  
+            group_by(AA) %>% 
+            summarise(arbovirus = sum(arbovirus), 
+                      vertebrate = sum(vertebrate), 
+                      humans = sum(humans)) %>% 
+            mutate(arb_norm = arbovirus / as.integer(arbo_codons), 
+                   vert_norm = vertebrate / as.integer(vert_codons), 
+                   human_norm = humans / as.integer(human_codons)) 
+
+neg_w_AA %>% cbind(viral_AA[2:4]) %>% 
+             mutate(diff = human_mean - mosq_mean, 
+                    AA = as.factor(AA)) %>% arrange(desc(diff)) %>% 
+             gather(human_mean, mosq_mean, key = species, value = w) %>%
+             gather(arbovirus, vertebrate, humans, key = "hosts", value = "cts_AA") %>% 
+             ggplot(aes(factor(AA, levels = order_AA), w, fill = species)) + 
+                    geom_bar(stat = "identity", position = "dodge") + 
+                    geom_line(aes(AA, cts_AA, group = hosts, col = hosts), size = 2) +
+                    theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                    labs(x = "codon", 
+                         title = "Human and Mosquito w Values for Each AA",
+                         subtitle = "total AA counts on top") + scale_fill_grey() + 
+                    scale_y_log10()
+
+neg_w_AA %>% cbind(viral_AA[5:7]) %>% 
+             mutate(diff = human_mean - mosq_mean, 
+                    AA = as.factor(AA)) %>% 
+             arrange(desc(diff)) %>% 
+             gather(human_mean, mosq_mean, key = species, value = w) %>% 
+             gather(arb_norm, vert_norm, human_norm, key = "hosts", value = "cts_AA") %>% 
+             ggplot(aes(factor(AA, levels = order_AA), w, fill = species)) +
+                    geom_bar(stat = "identity", position = "dodge") + 
+                    geom_line(aes(AA, cts_AA, group = hosts, col = hosts), size = 2) + 
+                    theme(axis.text.x = element_text(angle=60, hjust=1)) + 
+                    labs(x = "codon",
+                         title = "Human and Mosquito w Values for Each AA",
+                         subtitle = "normalized AA counts") + 
+                    scale_fill_grey()
+
+```
+
+Some example transcripts were made to show if any portion was more or less favored by either human or mosquito codon usage. No large areas of bias were discovered along the zika or chickungunya arbovirus genomes and polio (human specific) was used as a comparison. 
+
+```{r, zika ex, fig.width = 25}
+zika <- virus_tidy %>% filter(virus == "ZIKV") %>% select(seq)
+
+zika_codon <- strsplit(as.character(zika$seq[1]), "(?<=.{3})", perl = TRUE)[[1]] %>% as_tibble()
+colnames(zika_codon) <- "codon"
+
+zika_codon <- left_join(zika_codon, neg_w[c(1,3)], by = "codon")
+zika_codon <- left_join(zika_codon, neg_w[c(1,6)], by = "codon")
+
+zika_codon <- zika_codon %>% rowid_to_column() %>% gather(human, mosquito, key = species, value = w) %>% mutate(bin = as.integer(rowid / 1000))
+
+zika_codon %>% ggplot(aes(rowid, w, col = species, group = species)) + 
+                      geom_line(aes(group = species), size = 1, alpha = 0.5) + 
+                      facet_wrap(~bin  , scales = "free_x", nrow = 4)
+
+```
+
+```{r, chickungunya, fig.width = 25}
+chikv <- virus_tidy %>% filter(virus == "CHIKV") %>% select(seq) 
+chikv_codon <- strsplit(as.character(chikv$seq[1]), "(?<=.{3})", perl = TRUE)[[1]] %>% as_tibble()
+colnames(chikv_codon) <- "codon"
+chikv_codon <- left_join(chikv_codon, neg_w[c(1,3)], by = "codon")
+chikv_codon <- left_join(chikv_codon, neg_w[c(1,6)], by = "codon")
+chikv_codon <- chikv_codon %>% rowid_to_column() %>% gather(human, mosquito, key = species, value = w)
+chikv_codon <- chikv_codon %>% mutate(bin = as.integer(rowid / 500))
+chikv_codon %>% ggplot(aes(rowid, w, col = species, group = species)) + geom_line(aes(group = species), size = 1, alpha = 0.5) + facet_wrap(~bin  , scales = "free_x", nrow = 5)
+```
+
+```{r, polio, fig.width = 25}
+polio <- virus_tidy %>% filter(virus == "polio") %>% select(seq) 
+polio_codon <- strsplit(as.character(polio$seq[1]), "(?<=.{3})", perl = TRUE)[[1]] %>% as_tibble()
+colnames(polio_codon) <- "codon"
+polio_codon <- left_join(polio_codon, neg_w[c(1,3)], by = "codon")
+polio_codon <- left_join(polio_codon, neg_w[c(1,6)], by = "codon")
+polio_codon <- polio_codon %>% rowid_to_column() %>% gather(human, mosquito, key = species, value = w)
+polio_codon <- polio_codon %>% mutate(bin = as.integer(rowid / 500))
+polio_codon %>% ggplot(aes(rowid, w, col = species, group = species)) + geom_line(aes(group = species), size = 1, alpha = 0.5) + facet_wrap(~bin  , scales = "free_x", nrow = 5)
+
+
+polio <- virus_tidy %>% filter(virus == "polio") %>% select(seq)
+polio_codon <- strsplit(as.character(polio$seq[1]), "(?<=.{3})", perl = TRUE)[[1]] %>% as_tibble()
+colnames(polio_codon) <- "codon"
+polio_codon <- left_join(polio_codon, neg_w[c(1,3)], by = "codon")
+polio_codon <- left_join(polio_codon, neg_w[c(1,4)], by = "codon")
+polio_codon <- polio_codon %>% rowid_to_column() %>% gather(human, yeast, key = species, value = w)
+polio_codon <- polio_codon %>% mutate(bin = as.integer(rowid / 500))
+polio_codon %>% ggplot(aes(rowid, w, col = species, group = species)) + geom_line(aes(group = species), size = 1, alpha = 0.5) + facet_wrap(~bin  , scales = "free_x", nrow = 5)
+```
+
+The lack of bias in arbovirus usage of human or mosquito codons was quantified here where codons were categorized as either human or mosquito. This quantification also revealed no support that arboviruses utilize mosquito codons more than any other virus.
+
+```{r, codon games}
+human_codon <- order[1:16]
+neutral_codon <- order[17:48]
+mosquito_codon <- order[49:64]
+
+codon_type <- function(seq, result){  
+          codon_counts <-
+          seqinr::count(s2c(as.character(seq)), 3) %>%
+          as_tibble() %>% 
+          mutate(human_codon = ifelse(Var1 %in% human_codon, as.integer(n), NA), neutral_codon = ifelse(Var1 %in% neutral_codon, as.integer(n), NA), mosquito_codon = ifelse(Var1 %in% mosquito_codon, as.integer(n), NA))
+          codon_sums <- colSums(codon_counts[c(2:5)], na.rm = TRUE)
+          codon_percent <- cbind(codon_sums["human_codon"]/codon_sums["n"] *100, codon_sums["neutral_codon"]/codon_sums["n"] *100, codon_sums["mosquito_codon"]/codon_sums["n"] *100)
+          colnames(codon_percent) <- c("human_codon_percent", "neutral_codon_percent", "mosquito_codon_percent")
+          codon_percent[result]
+}
+
+virus_tidy <- virus_tidy %>%
+              mutate(human_codon_percent = unlist(map(seq, codon_type, 1)), 
+                     neutral_codon_percent = unlist(map(seq, codon_type, 2)), 
+                     mosquito_codon_percent = unlist(map(seq, codon_type, 3))) 
+
+virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+               gather(human_codon_percent, neutral_codon_percent, mosquito_codon_percent, key = codon_percent_type, value = codon_percent) %>%
+               ggplot(aes(hosts, codon_percent, fill = codon_percent_type)) + 
+                      geom_boxplot(position = "dodge")
+
+virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+               mutate(neutral_codon_percent_2 = neutral_codon_percent / 2) %>% 
+               gather(human_codon_percent, neutral_codon_percent_2, mosquito_codon_percent, key = codon_percent_type, value = codon_percent) %>%
+               ggplot(aes(hosts, codon_percent, fill = codon_percent_type)) + 
+                      geom_boxplot(position = "dodge")
+
+```
+
+This analysis was repeated with human and yeast favored codons. 
+
+```{r, }
+order2 <- neg_w[c(1,3,4)] %>% as_tibble() %>% mutate(diff = human - yeast, codon = as.factor(codon)) %>% arrange(desc(diff)) %>% .$codon
+
+human_codon2 <- order2[1:16]
+neutral_codon2 <- order2[17:48]
+yeast_codon2 <- order2[49:64]
+
+virus_tidy <- virus_tidy %>%
+              mutate(human_codon_percent = unlist(map(seq, codon_type, 1)),
+                     neutral_codon_percent = unlist(map(seq, codon_type, 2)), 
+                     yeast_codon_percent = unlist(map(seq, codon_type, 3))) 
+
+virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus",
+                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>%
+               gather(human_codon_percent, neutral_codon_percent, yeast_codon_percent, key = codon_percent_type, value = codon_percent) %>%
+               ggplot(aes(hosts, codon_percent, fill = codon_percent_type)) + 
+                      geom_boxplot(position = "dodge")
+
+virus_tidy %>% mutate(hosts = ifelse(virus %in% Vert_INV, "arbovirus", 
+                                     ifelse(virus %in% Vertebrate, "vertebrate", "human"))) %>% 
+               mutate(neutral_codon_percent_2 = neutral_codon_percent / 2) %>% 
+               gather(human_codon_percent, neutral_codon_percent_2, yeast_codon_percent, key = codon_percent_type, value = codon_percent) %>%
+               ggplot(aes(hosts, codon_percent, fill = codon_percent_type)) + 
+                      geom_boxplot(position = "dodge")
+
+```
+
