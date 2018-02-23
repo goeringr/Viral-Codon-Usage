@@ -1,0 +1,201 @@
+---
+title: "Viral Tropism"
+author: "Rae G"
+date: "January 8, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(cowplot)
+
+```
+
+## What am I trying to do?
+In this R markdown document I will explore the differences in codon adaptability as measured by general "human" codon usage (HEK293 cells) and tissue specific codon usage when applicable to a virus. It is expected that CAI values will be slightly higher when measured by the codon usage of the targeted tissue type.
+
+## How do I intend to do it?
+I will plot the tissue specific and general codon adaptability measurements against each other and compare to a x = y reference line.
+
+```{r, }
+virus_tidy <- readRDS("virus_tidy.txt")
+HEK_w <- readRDS("HEK_w.txt")
+tissue_w <- readRDS("tissue_w.txt")
+w <- left_join(tissue_w, HEK_w)
+
+```
+
+### PCA plot
+This should show the diversity in tissue specific w values where w is HEK293 w values.
+
+```{r, }
+PCw <-as.data.frame(prcomp(w[3:11])[2])
+PCw %>% ggplot(aes(rotation.PC1, rotation.PC2, col = rownames(.), label = rownames(.))) + geom_point() + geom_text(aes(label = rownames(.)))
+```
+
+```{r, warning=FALSE}
+tissue_virus <- virus_tidy %>% filter(tissue != "NA") %>% mutate(tissue_CAI = as.double(tissue_CAI), tissue_percent_opt = as.double(tissue_percent_opt)) 
+
+```
+
+```{r, linear model stats on plot}
+lm_eqn <- function(x, y){
+    m <- lm(y ~ x);
+    f <- summary(m)$fstatistic;
+    eq1 <- substitute(~~italic(r)^2~"="~r2*",",
+         list(a = format(coef(m)[1], digits = 2), 
+              b = format(coef(m)[2], digits = 2), 
+             r2 = format(summary(m)$r.squared, digits = 3)));
+    eq2 <- substitute(~~italic(p)~"="~pval,
+         list(pval = as.character(format(pf(f[1],f[2],f[3],lower.tail=FALSE), digits = 3))));
+   as.list(c(as.character(as.expression(eq1)), as.character(as.expression(eq2))));
+} 
+
+```
+
+### plotting CAI by tissue_CAI 
+This shows that CAI and tissue_CAI are very similar with CAI actually scoring higher than tissue specific CAI values. This is not what was expected.
+HepC may be the only exception
+
+```{r, }
+tissue_virus %>% ggplot(aes(CAI, tissue_CAI)) + 
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 0.81, y = 0.71), 
+            label = unlist(lm_eqn(tissue_virus$CAI, tissue_virus$tissue_CAI)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 0.81, y = 0.69), 
+            label = unlist(lm_eqn(tissue_virus$CAI, tissue_virus$tissue_CAI)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1)
+
+```
+
+### Percent_opt by tissue_percent_opt
+This plot shows a little more promise...
+
+```{r, }
+tissue_virus %>% ggplot(aes(percent_opt, tissue_percent_opt)) +
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 37, y = 25), 
+            label = unlist(lm_eqn(tissue_virus$percent_opt, tissue_virus$tissue_percent_opt)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 37, y = 23), 
+            label = unlist(lm_eqn(tissue_virus$percent_opt, tissue_virus$tissue_percent_opt)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1)
+
+```
+
+### Routes of Infection
+viruses may have better codon adaptability to tissues known to be associated with routes of infection. The gut, skin, upper respiratory and lymph nodes were our main tissues for infection. This analysis did not reveal much as tissue codon usage doesn't vary much from general human codon usage.
+
+```{r, Small Intestine}
+ROI_SmInt <- readRDS("ROI_SmInt.txt")
+
+ROI_SmInt %>% ggplot(aes(CAI, tissue_CAI)) + 
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 0.81, y = 0.71), 
+            label = unlist(lm_eqn(ROI_SmInt$CAI, ROI_SmInt$tissue_CAI)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 0.81, y = 0.69), 
+            label = unlist(lm_eqn(ROI_SmInt$CAI, ROI_SmInt$tissue_CAI)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("Small Intestine ROI CAI")
+
+ROI_SmInt %>% ggplot(aes(percent_opt, tissue_percent_opt)) +
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 37, y = 25), 
+            label = unlist(lm_eqn(ROI_SmInt$percent_opt, ROI_SmInt$tissue_percent_opt)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 37, y = 23), 
+            label = unlist(lm_eqn(ROI_SmInt$percent_opt, ROI_SmInt$tissue_percent_opt)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("Small Intestine ROI percent_opt")
+
+```
+
+```{r, skin}
+ROI_skin <- readRDS("ROI_skin.txt")
+
+ROI_skin %>% ggplot(aes(CAI, tissue_CAI)) + 
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 0.81, y = 0.71), 
+            label = unlist(lm_eqn(ROI_skin$CAI, ROI_skin$tissue_CAI)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 0.81, y = 0.69), 
+            label = unlist(lm_eqn(ROI_skin$CAI, ROI_skin$tissue_CAI)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("Skin ROI CAI")
+
+ROI_skin %>% ggplot(aes(percent_opt, tissue_percent_opt)) +
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 37, y = 25), 
+            label = unlist(lm_eqn(ROI_skin$percent_opt, ROI_skin$tissue_percent_opt)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 37, y = 23), 
+            label = unlist(lm_eqn(ROI_skin$percent_opt, ROI_skin$tissue_percent_opt)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("Skin ROI percent_opt")
+
+```
+
+```{r, lung}
+ROI_lung <- readRDS("ROI_lung.txt")
+
+ROI_lung %>% ggplot(aes(CAI, tissue_CAI)) + 
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 0.81, y = 0.71), 
+            label = unlist(lm_eqn(ROI_lung$CAI, ROI_lung$tissue_CAI)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 0.81, y = 0.69), 
+            label = unlist(lm_eqn(ROI_lung$CAI, ROI_lung$tissue_CAI)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("Lung ROI CAI")
+
+ROI_lung %>% ggplot(aes(percent_opt, tissue_percent_opt)) +
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 37, y = 25), 
+            label = unlist(lm_eqn(ROI_lung$percent_opt, ROI_lung$tissue_percent_opt)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 37, y = 23), 
+            label = unlist(lm_eqn(ROI_lung$percent_opt, ROI_lung$tissue_percent_opt)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("Lung ROI percent_opt")
+
+```
+
+```{r, lymph}
+ROI_lymph <- readRDS("ROI_lymph.txt")
+
+ROI_lymph %>% ggplot(aes(CAI, tissue_CAI)) + 
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 0.81, y = 0.71), 
+            label = unlist(lm_eqn(ROI_lymph$CAI, ROI_lymph$tissue_CAI)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 0.81, y = 0.69), 
+            label = unlist(lm_eqn(ROI_lymph$CAI, ROI_lymph$tissue_CAI)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("Lymph ROI CAI")
+
+ROI_lymph %>% ggplot(aes(percent_opt, tissue_percent_opt)) +
+  geom_point(aes(col = virus)) + 
+  geom_text(aes(x = 37, y = 25), 
+            label = unlist(lm_eqn(ROI_lymph$percent_opt, ROI_lymph$tissue_percent_opt)[1]),
+            parse = TRUE) + 
+  geom_text(aes(x = 37, y = 23), 
+            label = unlist(lm_eqn(ROI_lymph$percent_opt, ROI_lymph$tissue_percent_opt)[2]), 
+            parse = TRUE) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("Lymph ROI percent_opt")
+
+```
+
+
